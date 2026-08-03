@@ -1,0 +1,27 @@
+[package]
+name = "txt_rust_engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "txt_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "parse_txt_rust"
+path = "src/main.rs"
+
+[[bin]]
+name = "parse_txt_probe"
+path = "src/probe.rs"
+
+[dependencies]
+# 纯 Rust 回溯引擎：原生支持定长/变长环视（含后顾），无需任何 C 编译。
+# 它复刻了 Python 3.12 `re` 的环视语义，是本方案「零 C 依赖、零弹窗」的关键。
+fancy-regex = "0.13"
+# 仅 CLI 输出 JSON 用。
+serde_json = "1"
+# 纯 Rust 字符编码：raw 模式流式解码 GBK/GB18030/UTF-8，记录原始字节偏移，零 C 依赖。
+encoding_rs = "0.8"
+# 阶段 B-β：--serve 常驻模式内并行切章（单进程多核，编译一次引擎全线程共享）。
+rayon = "1"

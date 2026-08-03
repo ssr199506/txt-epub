@@ -1,0 +1,19 @@
+# ── 语料与生成数据 ──
+test_data/
+versions/
+task-logs/
+validate_report.json
+
+# ── 测试脚本 ──
+validate_corpus.py
+rust/tests/
+
+# ── 编译产物与缓存 ──
+rust/target/
+__pycache__/
+*.pyc
+
+# ── 二进制与备份 ──
+*.exe
+*.bak*
+scripts/
