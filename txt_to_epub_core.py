@@ -325,7 +325,9 @@ def build_epub(
         # 嵌套 TOC：每个卷作父节点，其下挂章节（EbookLib 用 (父, (子...)) 元组表达层级）
         nested = []
         for i, (vtitle, members) in enumerate(volumes):
-            children = tuple(toc[idx] for idx in members)
+            # 卷标记行常被章节解析器当成同名章节，导致父节点与首章在目录里重复；
+            # 跳过与卷名同名的成员（父节点已指向该首章，充当卷标题页）。
+            children = tuple(toc[idx] for idx in members if chapters[idx][0] != vtitle)
             # 父节点指向该卷首章（真实存在的目标），卷名作为分组标题
             parent = epub.Link(f"chap_{members[0] + 1:03d}.xhtml", vtitle, f"vol_{i}")
             nested.append((parent, children))
@@ -368,28 +370,51 @@ def volume_ranges(n_items: int, max_per_volume: int):
             for s in range(0, n_items, max_per_volume)]
 
 
-# 卷标记：第X卷（阿拉伯/中文数字）
-_VOL_PAT = re.compile(r"第\s*[0-9零一二三四五六七八九十百千]+\s*卷")
+# 卷标记：第X卷/部/篇/集（阿拉伯/中文数字）。网文常以篇/集/部作分卷单位，
+# 旧版只认「卷」会漏掉《吞噬星空》这类以篇/集分卷的书（借鉴参考项目的四类覆盖）。
+_VOL_PAT = re.compile(r"第\s*[0-9零一二三四五六七八九十百千]+\s*[卷部篇集]")
 # 卷名行允许的边界字符（书名号/括号/空格/全角空格）
 _VOL_TRIM = str.maketrans("", "", "【】()（）[] \u3000\t\r")
 # 正文里若出现这些字，说明那不是独立的卷标记行（如「第三卷第十四章有提到」）
-_VOL_BODY_KW = ("章", "回", "节", "部")
+_VOL_BODY_KW = ("章", "回", "节")
+# 卷尾标记：含这些说明是『某卷结束』而非分卷起点（借鉴参考项目的 exclude 思路）
+_VOL_END_KW = ("完", "终", "尾声", "结束")
+# 叙述性标点：含这些说明是散文句子而非卷标题行（如「继续阅读第三篇——驯兽篇。」）
+_VOL_PROSE_PUNCT = "。，、！？；：\"\"''（）【】《》〈〉—…·~～"
 
 
 def _is_volume_line(line: str) -> bool:
-    """判断一行是不是『独立的卷标记行』（而非正文里顺带提到的卷）。
+    """判断一行是不是『独立的卷标记行』（而非正文里顺带提到的卷/篇/集/部）。
 
-    例如「【第一卷】」算；「（第三卷第十四章有提到）」不算（含『章』且是叙述）。
+    例：「【第一卷】」「第二篇 战神罗峰」「第一篇 一夜觉醒 第一集 深夜觉醒」算；
+    「第20章 暗金色圆球（第一集终章）」（含章、括号）不算；
+    「继续阅读第三篇——驯兽篇。」（叙述句、含破折号句号）不算；
+    「第一卷终」（卷尾标记）不算；散文片段「前三卷功法」因叙述词/长度被兜底排除。
     """
-    cleaned = line.translate(_VOL_TRIM)
-    if re.fullmatch(r"第[0-9零一二三四五六七八九十百千]+卷", cleaned):
-        return True
-    # 允许「第X卷 副名」这类，但必须不含 章/回/节/部，且足够短
-    if (cleaned.startswith("第") and "卷" in cleaned
-            and not any(k in cleaned for k in _VOL_BODY_KW)
-            and len(cleaned) <= 12):
-        return True
-    return False
+    stripped = line.strip()
+    if not stripped:
+        return False
+    # 去掉书名号/括号/空格后做判定，但保留原行（带空格）作为卷名显示
+    compact = stripped.translate(_VOL_TRIM)
+    matches = list(_VOL_PAT.finditer(compact))
+    if not matches:
+        return False
+    # 卷标记必须位于行首（strip 已去前导空白），否则是句中提及，非标题行
+    if matches[0].start() > 0:
+        return False
+    # 含章节/回/节关键字 → 是章节标题行，不是卷
+    if any(k in compact for k in _VOL_BODY_KW):
+        return False
+    # 含卷尾标记 → 是某卷结束，不是分卷起点
+    if any(k in compact for k in _VOL_END_KW):
+        return False
+    # 含叙述性标点 → 散文句子，不是卷标题
+    if any(p in compact for p in _VOL_PROSE_PUNCT):
+        return False
+    # 整行过长（>20 字）基本是正文段落，不是干净的卷标题
+    if len(compact) > 20:
+        return False
+    return True
 
 
 def detect_volumes(index, source, encoding):
@@ -423,16 +448,20 @@ def detect_volumes(index, source, encoding):
     # 3) 每章的字符偏移：src 前 start 字节解码后得到的字符数
     chap_char = [len(src_bytes[:max(0, int(e["start"]))].decode(raw_enc, "replace"))
                  for e in index]
-    # 4) 卷标记（仅取独立行）
+    # 4) 卷标记（仅取独立行；同一行若同时含 篇+集 等多种标记，只记一次）
     vol_marks = []  # (vol_name, char_pos)
+    seen_lines = set()
     nl = "\n"
     for m in _VOL_PAT.finditer(dec):
         line_start = dec.rfind(nl, 0, m.start()) + 1
         line_end = dec.find(nl, m.start())
         if line_end == -1:
             line_end = len(dec)
+        if line_start in seen_lines:
+            continue
         line = dec[line_start:line_end].strip()
         if _is_volume_line(line):
+            seen_lines.add(line_start)
             vol_marks.append((line, line_start))
     if not vol_marks:
         return []
