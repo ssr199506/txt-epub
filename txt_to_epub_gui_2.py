@@ -17,6 +17,7 @@ from pathlib import Path
 from uuid import uuid4
 import threading
 import queue
+import json
 from typing import Optional
 
 # ===================================================================
@@ -1634,18 +1635,23 @@ class App(TkinterDnD.Tk):
                         self._temp_path, index, parts,
                         toc_pattern=self._get_selected_pattern(), book_title=title,
                     )
+                    # index 条目只有 start/end/title，不能直接当 chapters_subset 喂
+                    # build_epub_from_pack（它要 manifest 形状的带 file 条目，否则 KeyError: 'file'）。
+                    # manifest 与 index 同序，读一次 manifest 按同序位置切片传给子集组装。
+                    with open(manifest, encoding="utf-8") as mf:
+                        manifest_chapters = json.load(mf)["chapters"]
                     volumes = _nested_volumes([e["title"] for e in index])
                     self._last_outputs = self._write_volumes(
-                        out, title, author, cover_image, len(index),
+                        out, title, author, cover_image, len(manifest_chapters),
                         lambda s, e, t, v: build_epub_from_pack(
                             parts, manifest, t, author, cover_image=cover_image,
-                            chapters_subset=index[s:e], volumes=v,
+                            chapters_subset=manifest_chapters[s:e], volumes=v,
                         ),
                         volumes=volumes,
                     )
                 finally:
                     shutil.rmtree(parts, ignore_errors=True)
-                return len(index)
+                return len(manifest_chapters)
             # 编辑过 → 回退原 build_epub（按需补齐正文）
             self._ensure_all_bodies()
             chapters = [(ch[0], ch[1]) for ch in self.chapters]
