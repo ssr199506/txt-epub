@@ -83,6 +83,7 @@ from txt_to_epub_core import (  # noqa: E402
     parse_txt,
     build_epub,
     build_epub_from_pack,
+    volume_ranges,
     convert_single,
     ConversionResult,
     load_toc_rules,
@@ -148,6 +149,8 @@ class App(TkinterDnD.Tk):
         self.book_title = tk.StringVar()
         self.author = tk.StringVar(value="Unknown")
         self.encoding = tk.StringVar(value="utf-8")
+        self.max_chapters_per_volume = tk.IntVar(value=0)  # 0 = 不拆分
+        self._last_outputs = []  # 最近一次生成的输出路径（多卷时为多路径）
         self.batch_files: list[str] = []
         self._file_encodings: dict[str, str] = {}  # 批量模式下每文件的独立编码
         self.is_batch_mode = False
@@ -365,6 +368,15 @@ class App(TkinterDnD.Tk):
         )
         self.cmb_toc_rule.pack(side="left", padx=(0, 10))
         self.cmb_toc_rule.bind("<<ComboboxSelected>>", self._on_rule_changed)
+
+        # 多卷拆分选项（借鉴 legado 的大书分卷；默认 0=不拆分）
+        ttk.Label(toc_ctrl, text="  每卷章数：").pack(side="left")
+        self.spin_vol = ttk.Spinbox(
+            toc_ctrl, from_=0, to=2000, increment=50,
+            textvariable=self.max_chapters_per_volume, width=6,
+        )
+        self.spin_vol.pack(side="left", padx=(0, 4))
+        ttk.Label(toc_ctrl, text="（0=不拆分）").pack(side="left")
 
         self.parse_btn = tk.Button(
             toc_ctrl,
@@ -1545,15 +1557,38 @@ class App(TkinterDnD.Tk):
             self._set_ui_idle()
             self.progress_var.set(100)
             self.progress_label.config(text="处理完成！")
-            messagebox.showinfo(
-                "🎉 搞定！",
-                f"EPUB 文件已生成：\n{out}\n\n章节数：{ch_count}",
-            )
+            outs = self._last_outputs or [out]
+            if len(outs) > 1:
+                paths_text = "\n".join(str(p) for p in outs)
+                detail = f"已拆分为 {len(outs)} 卷：\n{paths_text}\n\n章节数：{ch_count}"
+            else:
+                detail = f"EPUB 文件已生成：\n{outs[0]}\n\n章节数：{ch_count}"
+            messagebox.showinfo("🎉 搞定！", detail)
 
         except Exception as e:
             self._set_ui_idle()
             self.progress_label.config(text="转换失败")
             messagebox.showerror("❌ 出错了", f"转换失败：{e}")
+
+    def _write_volumes(self, out, title, author, cover_image, n_items, build_one):
+        """按 self.max_chapters_per_volume 切块写多卷；返回输出路径列表。
+
+        build_one(start, end, volume_title) -> EpubBook
+        单卷（阈值<=0 或章节未超限）时返回 [out]，行为与原来完全一致。
+        """
+        ranges = volume_ranges(n_items, self.max_chapters_per_volume.get())
+        if len(ranges) == 1:
+            book = build_one(0, n_items, title)
+            _epub.write_epub(out, book)
+            return [out]
+        outs = []
+        for i, (s, e) in enumerate(ranges, 1):
+            vtitle = f"{title} 第{i}卷"
+            vout = out.with_name(f"{out.stem}_卷{i}{out.suffix}")
+            book = build_one(s, e, vtitle)
+            _epub.write_epub(vout, book)
+            outs.append(vout)
+        return outs
 
     def _run_single_serial(self, txt, out, title, author, cover_image):
         """串行路径：轻量索引未编辑 → Rust 按偏移打包 + 组装（内存恒定）；
@@ -1569,19 +1604,24 @@ class App(TkinterDnD.Tk):
                         self._temp_path, index, parts,
                         toc_pattern=self._get_selected_pattern(), book_title=title,
                     )
-                    book = build_epub_from_pack(parts, manifest, title, author, cover_image=cover_image)
-                    _epub.write_epub(out, book)
+                    self._last_outputs = self._write_volumes(
+                        out, title, author, cover_image, len(index),
+                        lambda s, e, t: build_epub_from_pack(
+                            parts, manifest, t, author, cover_image=cover_image,
+                            chapters_subset=index[s:e],
+                        ),
+                    )
                 finally:
                     shutil.rmtree(parts, ignore_errors=True)
                 return len(index)
             # 编辑过 → 回退原 build_epub（按需补齐正文）
             self._ensure_all_bodies()
-            book = build_epub(
-                [(ch[0], ch[1]) for ch in self.chapters], title, author,
-                cover_image=cover_image,
+            chapters = [(ch[0], ch[1]) for ch in self.chapters]
+            self._last_outputs = self._write_volumes(
+                out, title, author, cover_image, len(chapters),
+                lambda s, e, t: build_epub(chapters[s:e], t, author, cover_image=cover_image),
             )
-            _epub.write_epub(out, book)
-            return len(self.chapters)
+            return len(chapters)
         else:
             pattern = self._get_selected_pattern()
             result = convert_single(
@@ -1591,6 +1631,7 @@ class App(TkinterDnD.Tk):
             )
             if not result.success:
                 raise RuntimeError(result.error)
+            self._last_outputs = [result.output_path]
             return result.chapter_count
 
     def _run_single_parallel(self, txt, out, title, author, cover_image, num_chunks):
@@ -1626,8 +1667,10 @@ class App(TkinterDnD.Tk):
         self.progress_label.config(text="正在构建 EPUB...")
         self.update()
 
-        book = build_epub(all_chapters, title, author, cover_image=cover_image)
-        _epub.write_epub(out, book)
+        self._last_outputs = self._write_volumes(
+            out, title, author, cover_image, len(all_chapters),
+            lambda s, e, t: build_epub(all_chapters[s:e], t, author, cover_image=cover_image),
+        )
         return len(all_chapters)
 
     def _merge_chunks(self, temp_files):
@@ -1825,12 +1868,14 @@ class App(TkinterDnD.Tk):
         """完成单个文件：合并 → build_epub → 写入，返回 ConversionResult"""
         sorted_paths = [chunk_results[i] for i in sorted(chunk_results)]
         chapters = self._merge_chunks(sorted_paths)
-        book = build_epub(chapters, meta["title"], meta["author"])
-        _epub.write_epub(meta["out"], book)
+        outs = self._write_volumes(
+            meta["out"], meta["title"], meta["author"], None, len(chapters),
+            lambda s, e, t: build_epub(chapters[s:e], t, meta["author"]),
+        )
         return ConversionResult(
             success=True,
             file_path=meta["path"],
-            output_path=meta["out"],
+            output_path=outs[0],
             chapter_count=len(chapters),
         )
 

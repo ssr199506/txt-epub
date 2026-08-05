@@ -338,6 +338,20 @@ def _unique_path(path: Path) -> Path:
         counter += 1
 
 
+def volume_ranges(n_items: int, max_per_volume: int):
+    """返回每卷的 (start, end) 半开区间列表。
+
+    max_per_volume <= 0 时整本作为一卷 [(0, n_items)]；
+    否则按 max_per_volume 切块，末尾不足一卷也单独成卷。
+    借鉴 legado 的 getSeparatedEpub()（大书按 size 分卷），
+    此处以「每卷章数」为阈值，更确定、更易调试。
+    """
+    if max_per_volume <= 0:
+        return [(0, n_items)]
+    return [(s, min(s + max_per_volume, n_items))
+            for s in range(0, n_items, max_per_volume)]
+
+
 def convert_single(
     txt_path: Path,
     output_path: Path,
@@ -837,17 +851,19 @@ def pack_chapters(temp_path, index, out_dir, toc_pattern=None, book_title="", en
 
 
 def build_epub_from_pack(out_dir, manifest_path, book_title, author,
-                         lang="zh-CN", cover_image=None):
+                         lang="zh-CN", cover_image=None, chapters_subset=None):
     """按 Rust --pack 产出的 manifest.json + xhtml 小文件组装 EPUB。
 
     章节正文已在 xhtml 文件中（最终内容），Python 只做「按打包指南组装」：
     读 manifest 顺序、逐个读 xhtml 喂给 ebooklib，内存恒定，不再流式读源。
+    chapters_subset：多卷拆分时只组装该子集（list[chapter dict]），顺序须合法。
     """
     with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
+    chapters = manifest["chapters"] if chapters_subset is None else chapters_subset
     book, spine = _new_book(book_title, author, lang, cover_image)
     toc = []
-    for i, ch in enumerate(manifest["chapters"], 1):
+    for i, ch in enumerate(chapters, 1):
         c = epub.EpubHtml(title=ch["title"], file_name=ch["file"], lang=lang)
         with open(Path(out_dir) / ch["file"], encoding="utf-8") as cf:
             c.content = cf.read()
