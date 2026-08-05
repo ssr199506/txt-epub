@@ -67,8 +67,10 @@ def _pick(raw: bytes):
     if raw[:3] == _BOM_UTF8:
         return "utf-8-sig", 1.0
     if _utf8_clean(raw):
-        # utf-8 干净：有中文信号才定案；纯英文段不定案（怕后续是 gb18030 正文）
-        return ("utf-8", 1.0) if _has_cjk(raw.decode("utf-8")) else (None, _CONF_FALLBACK)
+        # utf-8 干净（含仅末尾被截断的采样）：安全解码检查中文信号。
+        # errors="ignore" 跳过样本尾部被截断的半字符，避免「unexpected end of data」崩溃
+        text = raw.decode("utf-8", errors="ignore")
+        return ("utf-8", 1.0) if _has_cjk(text) else (None, _CONF_FALLBACK)
     # 三路解码比中文连贯性：正确编码标点密集，错误编码是乱码、标点近零
     dens = {
         enc: _punct_density(raw.decode(enc, errors="replace"))
