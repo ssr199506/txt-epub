@@ -1,6 +1,6 @@
 # TXT → EPUB 转换工具（Rust 解析内核 · 大规模批处理路线）
 
-> 文档最后更新：2026-08-03（管道 + 批处理落地 · release 部署提速 4.5~5.8× · 阶段 C 评估判定不做）
+> 文档最后更新：2026-08-05（编码择优自动检测 · 数据驱动分层 · GUI 嵌套 TOC 与两处修复全部转正）
 
 一个把纯文本小说（TXT）转换成 EPUB 电子书的桌面小工具：自动按章节切分、批量处理、编码实时预览、章节拖拽排序、封面裁剪。内核历经「纯 Python → Rust 加速 → raw_offsets 实验（已否决）→ 管道/批处理（前进方向）」四段演进，踩坑与方向见下文。
 
@@ -14,9 +14,11 @@
 | **当前可用版本** | v3（本仓库根目录），GUI 默认走 **管道路径**：Python 解码 → 内存 UTF-8 → stdin → Rust 切章（零 temp，已落地，与 Legacy 写-temp 架构逐位一致）；Legacy 写 temp 作 fallback |
 | **已否决的方案** | `raw_offsets`（Rust 直接解 GBK 原始字节）——因 `encoding_rs` 与 Python `gbk` codec 对非法字节不一致而**判死刑**（详见「踩坑实录」坑 2c） |
 | **当前瓶颈** | ~~每文件一次 `subprocess` 启动 + temp 落盘~~ **已消除**（管道零 temp + 批处理单进程常驻均已落地，见 6.1 / 8.1 / 8.2）；现瓶颈为 Rust 解析本身（CPU 密集）与 Python 解码（约 22% 全链路，解码红线所致） |
-| **下一步方向** | ① 管道架构 ✅ ② 单进程批处理 ✅（serve + rayon，31 本 5.83s）→ ③ 阶段 C（PyO3/C 内核化）**已评估判定不做**（收益仅 ~4%，见 8.3）；余留事项：真机 GUI 点测、更大语料（18+ 本已验 31 本）复验 |
+| **下一步方向** | ① 管道架构 ✅ ② 单进程批处理 ✅（serve + rayon，31 本 5.83s）→ ③ 阶段 C（PyO3/C 内核化）**已评估判定不做**（收益仅 ~4%，见 8.3）；余留事项：真机 GUI 点测 ✅（2026-08-05 用户验收通过）、更大语料复验；GUI「目录」规则与 TOC_RE 章数差异待比对（见 7.14） |
 | **性能基准（release 构建，2026-08-03 实测）** | 31 本 / 7595 章 / 181MB UTF-8：serve 批量 **5.83s**、逐文件 pipe **12.15s**；⚠️ 早期 README 数据为 debug 构建（36MB exe），慢约 4.5~5.8×，勿再引用 |
 | **回退保障** | 历史版本全部归档于 `versions/`，可随时回退（见下节） |
+| **编码探测范式** | **择优**（三路解码比全角标点密度，非规则探测）：消除「gb18030 假高置信 conf=1.0 乱码」结构性缺陷；GUI **拖入即自动检测**，手动下拉仍可覆盖（详见 6.5 / 坑 8） |
+| **目录结构引擎** | **数据驱动分层** `hierarchy_rules.build_hierarchy`：纯函数只读 title 建嵌套（卷/部/篇/集→章），O(n) ~13ms，替代 legacy `detect_volumes` O(n²) ~12s（~950×）；GUI 嵌套 TOC 已接入（详见 6.6） |
 
 **一句话因果主线**：`v1 纯 py` → `v2 Rust 加速（成功）` → `raw_offsets 实验（失败：解码权不能交给 Rust）` → **教训固化 + 管道/批处理方向**。README 后半部分（踩坑实录 + 前进方向）就是这条主线的完整展开。
 
@@ -30,7 +32,7 @@
 |------|------|------|----------|
 | v1 纯 py 初始版 | `versions/1_pure_python/` | 7-25 最早版本 | 纯 Python 解码+分章+打包，不依赖 Rust、不写临时文件 |
 | v2 Rust 加速版 | `versions/2_rust_accel/` | 引入 Rust 后的可用快照（改 raw_offsets 之前） | Python 调 `parse_txt_rust.exe` 解析，核心逻辑已验证 |
-| v3 当前最终版 | 仓库根目录（本目录） | 最新成品 | 管道路径（Python 解码 → stdin → Rust 切章，零 temp）默认 + Legacy 写 temp 作 fallback；含 `--serve` 批处理引擎（阶段 B）；`parse_txt_rust.exe` 为 **release 构建**（5.2MB，2026-08-03 重新部署） |
+| v3 当前最终版 | 仓库根目录（本目录） | 最新成品 | 管道路径（Python 解码 → stdin → Rust 切章，零 temp）默认 + Legacy 写 temp 作 fallback；含 `--serve` 批处理引擎（阶段 B）；`parse_txt_rust.exe` 为 **release 构建**（5.2MB，2026-08-03 重新部署）；2026-08-05 再加：编码择优自动检测 + 数据驱动分层 + GUI 嵌套 TOC（已 fast-forward 转正 main @ 430e4a8） |
 
 演进关系：`v1 纯 py` → `v2 引入 Rust 加速` → `v3 加 raw_offsets 分支`。
 
@@ -45,6 +47,8 @@
 - **TXT → EPUB 转换**：基于正则规则自动识别章节标题并切分正文。
 - **批量处理**：可一次选择多本 TXT 连续转换。
 - **编码实时预览**：选择文件后即时预览前 800 字，支持 utf-8 / gbk / 其他常见编码，乱码可先预览再转换。
+- **编码自动检测（择优）**：加载即自动判定 utf-8 / gb18030 / big5（`encoding_detect.py`，三路解码比全角标点密度），预览不再默认 utf-8 乱码；判断错时仍可手动改编码。
+- **数据驱动嵌套目录**：按「卷/部/篇/集 → 章」层级生成嵌套 TOC（`--hierarchy default`，GUI 默认接入），O(n) 极快；`--hierarchy legacy` 作安全网。
 - **章节预览与排序**：列出识别出的章节，支持鼠标拖拽或按钮调整顺序。
 - **封面支持**：可选图片作封面，带裁剪预览（基于 Pillow）。
 - **实时进度条**：转换过程实时显示进度。
@@ -194,6 +198,61 @@ python txt_to_epub_gui_2.py
 
 **回退保证**：单线程路径完整保留——`os.cpu_count() <= 1` 自动走原串行路径；并行子进程异常自动降级为单线程继续，不会丢数据或卡死。
 
+### 6.5 编码择优（encoding_detect.py，探测 → 择优范式）
+
+**范式**：不做「探测」（用规则猜编码），让解码结果自己比赛（择优）。中文网文主流编码就 utf-8 / gb18030 / big5 三种，全部解出来比「中文连贯性」，最高者显著胜出即定案——天然规避「假高置信」病根（gb18030 几乎把每个字节都映射成字形 → 永远 0 替换符 → 乱码也 conf=1.0，见坑 8）。
+
+**决策链**：
+
+```
+1. BOM 优先：utf-8-sig 一眼定生死。
+2. utf-8 严格自校验：能干净解码且有中文信号 → utf-8（utf-8 是自验证编码，干净≈真）。
+   注意：utf-8 干净但无中文信号（纯英文元数据段）不定案，等更大样本
+   ——否则「英文序在前 + gb18030 正文」会被 8KB 英文段误判成 utf-8。
+3. 择优：utf-8(errors=replace) / gb18030 / big5 三路解码，比较全角标点密度。
+   正确解码中文通顺、标点密集；错误解码是乱码、标点近零（实测 #14：104×）。
+   最高密度需 ≥ 次高 3 倍 且 ≥ 0.05% 才定案，否则视为无中文信号、待续读。
+4. 阶梯采样：8KB 定案多数；未定案续读 64KB→512KB（25万本批量无效读取低）。
+5. 置信度诚实化：择优是确定性决策，不报「假 1.0」——严格证据 1.0，择优胜出 0.9，无中文信号兜底 0.5。
+```
+
+**性能**：512KB 样本单次 6.3ms、8KB 样本 0.078ms（25 万本估算 0.01~0.39 小时，可忽略）。**为何不引现成库**：chardet 对中文网文反而更差（判俄语/希腊语、慢 10-30×），charset-normalizer 对 BOM/带坏字节文件直接放弃；纯标准库自研是中文两编码（utf-8/gb18030）的精简主场。
+
+### 6.6 数据驱动分层（hierarchy_rules.build_hierarchy，替代 legacy detect_volumes）
+
+**两层模型（单向无环、低耦合小模块）**：
+
+```
+第一层 parse 照旧 → 产出平铺 index（完全不知道「层级」概念，不反喂 spec）
+第二层 build_hierarchy(index, rules) 纯函数小模块，只读 index['title'] 建嵌套
+第三层 build_epub 照旧吃 index + volumes；依赖只发生在编排层，库层零互 import
+```
+
+**判定规则（范式反转，替代硬编码「卷>部>篇>集>章」优先级）**：
+1. 作者一本书只用一种命名法，章/回/集/卷不混用同级；同时出现两种匹配 → 必为上下级（共存即层级）。
+2. **数量定高低**：各候选单位独立行匹配数升序排，少=容器（高层）、多=章节（低层）；默认 `ratio=2`（容器计数 ≤ 章节数/2），既接受分卷偏密的真书、又拒「容器占比近 1」的切块异常（用户原提 10× 会误杀稠密网文，故调为 2）。
+3. 数量接近 = 异常信号（原书不会有）→「节」永不入容器（网站按几字一节切块导致忽大忽小）；出现「章」就认准章。
+4. **严格守卫**（复用 `_is_volume_line` 式）：行首锚定、不含 章/回/节、排除卷尾（完/终/尾声/结束）、不含叙述性标点、整行 ≤ 20 字——裸正则会误抓「第九集团军」（第X集）、「《断灭》第二卷尽皆施展！」（正文叙述）。
+
+**性能**：第二层只消费已物化的 title 列表（吞噬星空 14975 字符 vs 源 ~10MB，0.15%），O(n) ~13ms；替代 legacy `detect_volumes` 的 O(n²) 字节偏移换算（每章从头 decode 一次 ≈ 8GB 工作量，实测 12s，新引擎快 ~950×）。**双轨**：`--hierarchy default|legacy`，legacy 作安全网（含 O(n²) 债）。
+
+### 6.7 GUI 全链路数据流（转正后 main 的最终形态）
+
+```
+拖入 TXT
+  → _auto_detect_encoding()：detect_encoding 定码（单文件 / 批量逐文件），下拉框自动回填（仍可手动覆盖）
+  → refresh_preview()：按检测编码读全文 → _full_text（内存，供预览 + 管道解析）
+  → _parse_chapters() → parse_txt_index(text_str=_full_text)：管道模式，零 temp
+      Rust --mode parse 从 stdin 切章 → 返回 (Utf8Buffer, index)
+  → self.chapters = [(title, "", index_entry), ...]（正文懒加载）
+  → 转换 _run_single_serial（轻量打包路径）：
+      pack_chapters(Utf8Buffer, index, parts) → xhtml 物化 + manifest.json
+      build_epub_from_pack(parts, manifest, ..., chapters_subset=manifest_chapters[s:e], volumes=嵌套分组)
+      → 单卷：嵌套 TOC（卷→章）；多卷拆分：每卷各自扁平（volumes=None，避免跨卷下标错乱）
+```
+
+**关键对齐（坑 10 的教训固化）**：`chapters_subset` 必须是 **manifest 形状**（带 `file` 字段）；index 条目只有 start/end/title，不能直接喂。manifest 与 index **同序** → 「读 manifest → 按同序位置切片」即可安全取子集。
+
 ---
 
 ## 七、⭐ 踩坑实录（本项目最宝贵的部分）
@@ -295,6 +354,7 @@ v1 纯 Python 解析 ──→ v2 Rust 加速（成功：Rust 切章快数倍）
 - 当前 Rust 内核**默认走管道路径**（Python 解码 → 内存 UTF-8 → stdin → Rust 切章，零 temp，已落地 2026-08-03），与 Legacy 写-temp 架构章数/标题/正文逐位一致；Legacy 写 temp 仅作 fallback。
 - `raw_offsets` 分支保留为 experimental，GUI 默认关闭（`raw_offsets=False`）。
 - 回滚安全副本：`versions/2_rust_accel/`（改 raw_offsets 之前的可用版本全套：exe + `rust_src/` + 两个 py）。
+- （2026-08-05）main 已 fast-forward 转正到 **430e4a8**：编码择优自动检测（GUI 拖入即定码）+ 数据驱动分层引擎 + GUI 嵌套 TOC + 两处 GUI 修复（自动检测接入 769c46c / chapters_subset 打包修复 430e4a8）全部并入；fast-forward 零代码改动 → 零回归。回退：`git reset --hard 33ddb66` 回到扁平分层前的稳定点。
 
 ### 7.10 规模论证与决策来源（845 GB / 25 万文件）
 
@@ -306,6 +366,51 @@ v1 纯 Python 解析 ──→ v2 Rust 加速（成功：Rust 切章快数倍）
 
 **决策来源（管道方向是谁提的）**
 - 管道架构方向（Python 解码 → stdin → Rust 切章，零 temp）**不是凭空设计，而是用户参考外部 AI 对该 845GB 规模的评估后，亲自提出的重构方案**，经我评估认同（低风险先做 stdin 1+2、常驻进程 3 延后）。这把「raw_offsets 死路」与「845GB 规模」串成同一根逻辑线：**Rust 碰解码不行（raw 死），全量落盘也不行（规模崩），正确解法是 Python 解码 + 管道直喂 Rust 切章。**
+
+### 7.11 坑 8：编码探测「假高置信」→ 改择优范式（2026-08-05）
+
+**现象**：《扶摇河山》实际是 UTF-8（12.77% 聚集性坏字节），旧探测却报 gb18030 conf=1.0，整本解成「鎵舵憞娌冲北」乱码、章节全乱。
+
+**根因（结构性，不是修阈值能解决）**：
+- utf-8 自校验是「全有或全无」：1 个坏字节就整体拒绝 → 带聚集坏字节的真 utf-8 被赶进 gb18030 分支；
+- gb18030 是稠密映射（几乎每个字节都映射成字形）→ 永远 0 替换符 → 「能干净解码」不是 gb18030 的证据，反而造成 **假高置信 conf=1.0**。
+- 两个极端之间没有中间地带 = 探测范式的死穴；置信度在这种结构下必然说谎。
+
+**判别式（已实测，对称通用）**：正确中文解码 ↔ 全角标点密度碾压错误解码。#14 实测 utf-8 解码标点密度 7.69% vs gb18030 0.053% ≈ **104×**；对真 gb18030 文件反向成立，非偏置。
+
+**修法 = 扔掉「探测」换「择优」**：BOM 优先 → utf-8 严格自校验（须有中文信号才定案）→ 三路解码比全角标点密度（3× 阈值 + 0.05% 下限）→ 阶梯采样 8KB→64KB→512KB（纯英文序在前不误判）→ 置信度诚实化（1.0/0.9/0.5，消灭假 1.0）。详见 6.5。
+
+**附坑（截断崩溃）**：重写版对截断样本裸解 `raw.decode('utf-8')`，样本末尾截在多字节字符中间会抛 `unexpected end of data` → 改 `errors="ignore"` 跳过尾部半字符，回归测试补 `test_truncated_sample_no_crash`。
+
+### 7.12 坑 9：GUI 从未接自动检测（默认 utf-8 硬解 → 乱码 + 逼手动选码 + 转换失败）（2026-08-05）
+
+**现象**：GUI 拖书 → 窗口乱码；必须手动换编码；「说好的默认检测没了」；乱码后手动换编码还可能直接弹「转换失败」。
+
+**根因（三合一，核心是「模块有了、接入漏了」）**：编码择优 `detect_encoding` 只进了 core/CLI，**GUI 的加载流程从未调用它**——`self.encoding` 硬编码默认 `utf-8`，加载时直接 utf-8 硬解：
+- 预览乱码（gb18030 书按 utf-8 解）；
+- 且 `refresh_preview` / `_parse_chapters` / `pack_chapters` 全程吃 `self.encoding.get()`，错编码贯穿解析与打包（吞噬星空实测：utf-8 默认 → 1688 章（错）/ 0 卷分组（嵌套 TOC 全失效变扁平）/ 首章 CJK=7（乱码）；gb18030 → 1601 章 / 31 卷 / CJK=279）；
+- 手动去换编码若手滑选 Rust 不支持的（utf-16 / shift_jis）→ Rust 引擎 raise → 弹「转换失败」。
+
+**修法（+19/-4，仅 GUI 文件）**：`_switch_to_single` / `_switch_to_batch` 加载时调 `_auto_detect_encoding()`（detect_encoding，失败兜底 gb18030）回填下拉框；手动下拉仍可覆盖（用户判断错时改）；下拉框补 `utf-8-sig`（BOM 检测返回它，readonly 下拉框需在列表里才显示）。
+
+**教训固化**：新功能模块写完后，必须检查「**调用方有没有真的接上**」——「编码模块写好」≠「GUI 在用」，本次正是接入遗漏。
+
+### 7.13 坑 10：chapters_subset 形状错 → KeyError: 'file'（转换失败）+ 验证盲区（2026-08-05）
+
+**现象**：自动检测编码生效后（不乱码了），点转换仍弹「转换失败」。
+
+**根因**：`_run_single_serial` 轻量打包路径把 **index 条目**（只有 start/end/title）当 `chapters_subset` 传给 `build_epub_from_pack`，而该函数逐章取 `ch["file"]`（manifest 形状字段）→ `KeyError: 'file'`。**契约本来就是「manifest 形状」，错的是调用方。**
+
+**为什么没被验证抓住（验证盲区，重要教训）**：此前 headless 验证用「合成 manifest」或 legacy 文件路径，**没走 GUI 真实管道路径**（`_parse_async` 传 `text_str` → 管道模式 → 返回 `Utf8Buffer`）→ 漏检。**修复范式：GUI 路径 bug 必须「与 GUI 完全一致」复现**——import GUI 模块（不实例化窗口）、复用其 `TOC_RULES_JSON` / `load_toc_rules`，按 `refresh_preview → parse_txt_index(text_str=…) → pack_chapters → build_epub_from_pack` 逐步调用，先拿到真实异常再改。
+
+**修法（+9/-3，仅 GUI 文件）**：pack 后读一次 manifest.json，`chapters_subset=manifest["chapters"][s:e]`（与 index 同序，切片等价）；GUI 补 `import json`。core 契约不变。
+
+**验证**：修复后 GUI 管道路径 → 吞噬星空 1521 章 / 31 卷嵌套 / ol=32 / li=1521 / nav 重复 0 / mimetype 首位 / 首章正文 CJK=283 替换符 0；多卷拆分（max=500）4 卷全合法；用户 GUI 复测「运行正常」。
+
+### 7.14 观察：GUI 默认「目录」规则 vs TOC_RE 章节数差异（非 bug，待用户定）
+
+- GUI 默认选中规则文件 `exportTxtTocRule..json` 里的「目录」规则，解析吞噬星空得 **1521 章**；convert_cli 默认内置 `TOC_RE` 得 **1601 章**（差 80 章）。
+- 两套规则不同属正常（GUI 规则可配置），**不是引擎丢章**；但若 GUI 转出比预期少章，需人工比对两规则差异。
 
 ---
 
