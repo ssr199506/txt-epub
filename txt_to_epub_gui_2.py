@@ -96,6 +96,7 @@ from txt_to_epub_core import (  # noqa: E402
     _crop_cover_image,
     HAVE_PIL,
 )
+from hierarchy_rules import build_hierarchy as _build_hierarchy
 from ebooklib import epub as _epub  # noqa: E402 — 依赖已在上方验证
 from tkinterdnd2 import DND_FILES, TkinterDnD  # noqa: E402
 
@@ -107,6 +108,18 @@ if HAVE_PIL:
 # 章节规则 JSON 路径
 # ===================================================================
 TOC_RULES_JSON = Path(__file__).resolve().parent / "exportTxtTocRule..json"
+
+
+def _nested_volumes(titles):
+    """由章节标题序列计算嵌套分组（数据驱动分层引擎 build_hierarchy）。
+
+    扁平书（无卷/部/篇/集标记）返回 []，调用方据此退回扁平 TOC，零回归。
+    titles 必须与传给 build_epub / build_epub_from_pack 的 chapters 同序，
+    返回的 0 基下标才正确指向上述 chapters。
+    """
+    if not titles:
+        return []
+    return _build_hierarchy([{"title": t} for t in titles])
 
 
 # ===================================================================
@@ -1570,22 +1583,24 @@ class App(TkinterDnD.Tk):
             self.progress_label.config(text="转换失败")
             messagebox.showerror("❌ 出错了", f"转换失败：{e}")
 
-    def _write_volumes(self, out, title, author, cover_image, n_items, build_one):
+    def _write_volumes(self, out, title, author, cover_image, n_items, build_one, volumes=None):
         """按 self.max_chapters_per_volume 切块写多卷；返回输出路径列表。
 
-        build_one(start, end, volume_title) -> EpubBook
-        单卷（阈值<=0 或章节未超限）时返回 [out]，行为与原来完全一致。
+        build_one(start, end, volume_title, volumes) -> EpubBook
+        单卷（阈值<=0 或章节未超限）时返回 [out]，行为与原来完全一致；
+        此时若传入 volumes（嵌套分组）则生成『卷→章』嵌套 TOC。
+        多卷拆分时每个分卷各自扁平（volumes 置 None），避免跨卷下标错乱。
         """
         ranges = volume_ranges(n_items, self.max_chapters_per_volume.get())
         if len(ranges) == 1:
-            book = build_one(0, n_items, title)
+            book = build_one(0, n_items, title, volumes)
             _epub.write_epub(out, book)
             return [out]
         outs = []
         for i, (s, e) in enumerate(ranges, 1):
             vtitle = f"{title} 第{i}卷"
             vout = out.with_name(f"{out.stem}_卷{i}{out.suffix}")
-            book = build_one(s, e, vtitle)
+            book = build_one(s, e, vtitle, None)
             _epub.write_epub(vout, book)
             outs.append(vout)
         return outs
@@ -1604,12 +1619,14 @@ class App(TkinterDnD.Tk):
                         self._temp_path, index, parts,
                         toc_pattern=self._get_selected_pattern(), book_title=title,
                     )
+                    volumes = _nested_volumes([e["title"] for e in index])
                     self._last_outputs = self._write_volumes(
                         out, title, author, cover_image, len(index),
-                        lambda s, e, t: build_epub_from_pack(
+                        lambda s, e, t, v: build_epub_from_pack(
                             parts, manifest, t, author, cover_image=cover_image,
-                            chapters_subset=index[s:e],
+                            chapters_subset=index[s:e], volumes=v,
                         ),
+                        volumes=volumes,
                     )
                 finally:
                     shutil.rmtree(parts, ignore_errors=True)
@@ -1617,9 +1634,11 @@ class App(TkinterDnD.Tk):
             # 编辑过 → 回退原 build_epub（按需补齐正文）
             self._ensure_all_bodies()
             chapters = [(ch[0], ch[1]) for ch in self.chapters]
+            volumes = _nested_volumes([ch[0] for ch in self.chapters])
             self._last_outputs = self._write_volumes(
                 out, title, author, cover_image, len(chapters),
-                lambda s, e, t: build_epub(chapters[s:e], t, author, cover_image=cover_image),
+                lambda s, e, t, v: build_epub(chapters[s:e], t, author, cover_image=cover_image, volumes=v),
+                volumes=volumes,
             )
             return len(chapters)
         else:
@@ -1667,9 +1686,11 @@ class App(TkinterDnD.Tk):
         self.progress_label.config(text="正在构建 EPUB...")
         self.update()
 
+        volumes = _nested_volumes([t for t, _ in all_chapters])
         self._last_outputs = self._write_volumes(
             out, title, author, cover_image, len(all_chapters),
-            lambda s, e, t: build_epub(all_chapters[s:e], t, author, cover_image=cover_image),
+            lambda s, e, t, v: build_epub(all_chapters[s:e], t, author, cover_image=cover_image, volumes=v),
+            volumes=volumes,
         )
         return len(all_chapters)
 
@@ -1868,9 +1889,11 @@ class App(TkinterDnD.Tk):
         """完成单个文件：合并 → build_epub → 写入，返回 ConversionResult"""
         sorted_paths = [chunk_results[i] for i in sorted(chunk_results)]
         chapters = self._merge_chunks(sorted_paths)
+        volumes = _nested_volumes([t for t, _ in chapters])
         outs = self._write_volumes(
             meta["out"], meta["title"], meta["author"], None, len(chapters),
-            lambda s, e, t: build_epub(chapters[s:e], t, meta["author"]),
+            lambda s, e, t, v: build_epub(chapters[s:e], t, meta["author"], volumes=v),
+            volumes=volumes,
         )
         return ConversionResult(
             success=True,

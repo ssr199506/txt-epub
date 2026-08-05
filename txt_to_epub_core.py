@@ -135,7 +135,10 @@ def parse_txt(
         chapters = [(e["title"], read_chapter(temp, e)) for e in index]
     finally:
         try:
-            os.remove(temp)
+            # 正常 Rust 管道模式 temp 是 Utf8Buffer（内存 bytes，无落盘文件），无需删除；
+            # 仅旧路径保底写 temp 文件时才需清理
+            if not isinstance(temp, Utf8Buffer):
+                os.remove(temp)
         except OSError:
             pass
         if text_str is not None:
@@ -485,6 +488,16 @@ def detect_volumes(index, source, encoding):
     return groups
 
 
+from hierarchy_rules import build_hierarchy as _build_hierarchy
+
+
+def _nested_volumes(titles):
+    """由章节标题序列计算嵌套分组（数据驱动分层引擎）。扁平书返回 []。"""
+    if not titles:
+        return []
+    return _build_hierarchy([{"title": t} for t in titles])
+
+
 def convert_single(
     txt_path: Path,
     output_path: Path,
@@ -501,9 +514,10 @@ def convert_single(
     """
     try:
         chapters = parse_txt(txt_path, encoding, toc_pattern=toc_pattern)
+        volumes = _nested_volumes([c[0] for c in chapters])
         book = build_epub(
             chapters, book_title or txt_path.stem, author,
-            cover_image=cover_image,
+            cover_image=cover_image, volumes=volumes,
         )
         final_output = _unique_path(output_path)
         epub.write_epub(final_output, book)
