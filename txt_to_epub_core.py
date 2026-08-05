@@ -325,9 +325,11 @@ def build_epub(
         # 嵌套 TOC：每个卷作父节点，其下挂章节（EbookLib 用 (父, (子...)) 元组表达层级）
         nested = []
         for i, (vtitle, members) in enumerate(volumes):
-            # 卷标记行常被章节解析器当成同名章节，导致父节点与首章在目录里重复；
-            # 跳过与卷名同名的成员（父节点已指向该首章，充当卷标题页）。
-            children = tuple(toc[idx] for idx in members if chapters[idx][0] != vtitle)
+            # 父节点指向该卷首章(members[0])，故首章不再作为子项列出，
+            # 避免「父/子同 href」重复（通用去重，覆盖 default 与 legacy 两种引擎）。
+            # 卷标记行被章节解析器当成同名章节时(members[0] 即卷名行)同样被排除，充当卷标题页。
+            children = tuple(toc[idx] for idx in members
+                             if idx != members[0] and chapters[idx][0] != vtitle)
             # 父节点指向该卷首章（真实存在的目标），卷名作为分组标题
             parent = epub.Link(f"chap_{members[0] + 1:03d}.xhtml", vtitle, f"vol_{i}")
             nested.append((parent, children))
@@ -1007,7 +1009,8 @@ def build_epub_from_pack(out_dir, manifest_path, book_title, author,
     if volumes:
         nested = []
         for k, (vtitle, members) in enumerate(volumes):
-            children = tuple(toc[idx] for idx in members)
+            # 父节点指向首章(members[0])，首章不再作为子项列出，避免父/子同 href 重复
+            children = tuple(toc[idx] for idx in members if idx != members[0])
             parent = epub.Link(chapters[members[0]]["file"], vtitle, f"vol_{k}")
             nested.append((parent, children))
         book.toc = tuple(nested)

@@ -32,6 +32,7 @@ import sys
 
 import txt_to_epub_core as core
 from encoding_detect import detect_encoding
+import hierarchy_rules
 
 
 def write_volumes(out: Path, title: str, author: str, cover_image,
@@ -64,7 +65,8 @@ def write_volumes(out: Path, title: str, author: str, cover_image,
 
 def convert_file(txt_path, out_dir=None, title=None, author="",
                  max_per_volume: int = 0, encoding=None, cover_image=None,
-                 no_volume: bool = False, verbose: bool = True):
+                 no_volume: bool = False, hierarchy: str = "default",
+                 verbose: bool = True):
     """高层 API：把一个 TXT 转成 EPUB（可多卷、可嵌套 TOC）。返回输出路径列表。
 
     :param txt_path: 输入 TXT 路径
@@ -75,6 +77,8 @@ def convert_file(txt_path, out_dir=None, title=None, author="",
     :param encoding: 编码字符串；``None``/``"auto"`` 时自动探测
     :param cover_image: 封面 JPEG 字节（可选）
     :param no_volume: True 时禁用『卷→章』嵌套 TOC（强制扁平，与旧版一致）
+    :param hierarchy: 嵌套目录引擎：``"default"``=数据驱动分层(hierarchy_rules，技术储备)；
+                      ``"legacy"``=原硬编码卷识别(core.detect_volumes)
     """
     txt_path = Path(txt_path)
     if encoding is None or encoding == "auto":
@@ -106,9 +110,22 @@ def convert_file(txt_path, out_dir=None, title=None, author="",
     # 三种索引模式（管道/raw/legacy）均正确，且不受标题误匹配影响。
     volumes = None
     if not no_volume:
-        volumes = core.detect_volumes(index, temp, encoding)
-        if verbose and volumes:
-            print(f"[目录] 嵌套 TOC：{len(volumes)} 个分组（卷/正文）")
+        if hierarchy == "default":
+            # 数据驱动分层（hierarchy_rules）：只读 index['title'] 判类型，
+            # 按"数量差定层级 + 章锚定排干扰"建嵌套，零重扫源文件。
+            volumes = hierarchy_rules.build_hierarchy(index)
+            if verbose:
+                info = hierarchy_rules.analyze(index)
+                if info["accepted_containers"]:
+                    print(f"[目录] 数据驱动分层(default)：接受容器 {info['accepted_containers']}；"
+                          f"{len(volumes)} 个分组（章节级 {info['chapter_count']}）")
+                else:
+                    print(f"[目录] 数据驱动分层(default)：未发现明确层级，退回扁平 TOC")
+        else:
+            # 原硬编码卷识别（legacy）：保留作备用，行为与原版一致。
+            volumes = core.detect_volumes(index, temp, encoding)
+            if verbose and volumes:
+                print(f"[目录] 嵌套 TOC(legacy)：{len(volumes)} 个分组（卷/正文）")
 
     title = title or txt_path.stem
     out_dir = Path(out_dir) if out_dir else txt_path.parent
@@ -140,6 +157,8 @@ def main(argv=None) -> int:
                     help="每卷最大章数（0=不拆分，默认）")
     ap.add_argument("--no-volume", action="store_true",
                     help="禁用『卷→章』嵌套目录，强制扁平（与旧版一致）")
+    ap.add_argument("--hierarchy", choices=["default", "legacy"], default="default",
+                    help="嵌套目录引擎：default=数据驱动分层(技术储备) / legacy=原硬编码卷识别")
     ap.add_argument("--cover", help="封面图路径（JPEG）")
     args = ap.parse_args(argv)
 
@@ -150,6 +169,7 @@ def main(argv=None) -> int:
             args.txt, out_dir=args.out, title=args.title, author=args.author,
             max_per_volume=args.max_per_volume, encoding=args.encoding,
             cover_image=cover, no_volume=args.no_volume,
+            hierarchy=args.hierarchy,
         )
     except Exception as e:  # noqa: BLE001 — CLI 层统一兜底报错
         print(f"[错误] {e}", file=sys.stderr)
