@@ -35,23 +35,27 @@ from encoding_detect import detect_encoding
 
 
 def write_volumes(out: Path, title: str, author: str, cover_image,
-                  chapters, max_per_volume: int):
+                  chapters, max_per_volume: int, volumes=None):
     """按 ``max_per_volume`` 把 chapters 切块写多卷；返回输出路径列表。
 
     ``chapters`` 为 ``[(标题, 正文), ...]``，build 复用主体 ``core.build_epub``
     （与 GUI 同一引擎）。
+    ``volumes``：由 core.detect_volumes 返回的嵌套分组；单文件（不拆分）时
+    据此生成『卷→章』嵌套 TOC；拆分时各物理卷内部用扁平 TOC（卷嵌套主要服务单文件场景）。
     单卷（<=0 或章节未超限）返回 ``[out]``，与原单卷行为完全一致；
     多卷时每卷文件名加「_卷N」后缀，且各卷独立嵌入封面，保证任意一卷可单独打开。
     """
     ranges = core.volume_ranges(len(chapters), max_per_volume)
     if len(ranges) == 1:
-        book = core.build_epub(chapters, title, author, cover_image=cover_image)
+        book = core.build_epub(chapters, title, author, cover_image=cover_image,
+                               volumes=volumes)
         core.epub.write_epub(out, book)
         return [out]
     outs = []
     for i, (s, e) in enumerate(ranges, 1):
         vtitle = f"{title} 第{i}卷"
         vout = out.with_name(f"{out.stem}_卷{i}{out.suffix}")
+        # 拆分时各物理卷内部扁平 TOC（不跨物理卷拼接卷层级）
         book = core.build_epub(chapters[s:e], vtitle, author, cover_image=cover_image)
         core.epub.write_epub(vout, book)
         outs.append(vout)
@@ -60,8 +64,8 @@ def write_volumes(out: Path, title: str, author: str, cover_image,
 
 def convert_file(txt_path, out_dir=None, title=None, author="",
                  max_per_volume: int = 0, encoding=None, cover_image=None,
-                 verbose: bool = True):
-    """高层 API：把一个 TXT 转成 EPUB（可多卷）。返回输出路径列表。
+                 no_volume: bool = False, verbose: bool = True):
+    """高层 API：把一个 TXT 转成 EPUB（可多卷、可嵌套 TOC）。返回输出路径列表。
 
     :param txt_path: 输入 TXT 路径
     :param out_dir:  输出目录（默认与源文件同目录）
@@ -70,6 +74,7 @@ def convert_file(txt_path, out_dir=None, title=None, author="",
     :param max_per_volume: 每卷最大章数（0=不拆分）
     :param encoding: 编码字符串；``None``/``"auto"`` 时自动探测
     :param cover_image: 封面 JPEG 字节（可选）
+    :param no_volume: True 时禁用『卷→章』嵌套 TOC（强制扁平，与旧版一致）
     """
     txt_path = Path(txt_path)
     if encoding is None or encoding == "auto":
@@ -96,12 +101,22 @@ def convert_file(txt_path, out_dir=None, title=None, author="",
     if not chapters:
         raise RuntimeError("未解析到任何章节，请检查目录规则或编码是否选错")
 
+    # 单文件嵌套 TOC：按索引字节偏移对齐扫描卷标记分组（无卷则自动退回扁平）。
+    # 直接用 parse_txt_index 返回的 index + source（Utf8Buffer/路径），
+    # 三种索引模式（管道/raw/legacy）均正确，且不受标题误匹配影响。
+    volumes = None
+    if not no_volume:
+        volumes = core.detect_volumes(index, temp, encoding)
+        if verbose and volumes:
+            print(f"[目录] 嵌套 TOC：{len(volumes)} 个分组（卷/正文）")
+
     title = title or txt_path.stem
     out_dir = Path(out_dir) if out_dir else txt_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{title}.epub"
 
-    outs = write_volumes(out, title, author, cover_image, chapters, max_per_volume)
+    outs = write_volumes(out, title, author, cover_image, chapters,
+                          max_per_volume, volumes=volumes)
     if verbose:
         if len(outs) == 1:
             print(f"[完成] 单卷 -> {outs[0]}")
@@ -123,6 +138,8 @@ def main(argv=None) -> int:
                     help="编码：auto（默认）/ utf-8 / gbk / gb18030 / big5 ...")
     ap.add_argument("--max-per-volume", type=int, default=0,
                     help="每卷最大章数（0=不拆分，默认）")
+    ap.add_argument("--no-volume", action="store_true",
+                    help="禁用『卷→章』嵌套目录，强制扁平（与旧版一致）")
     ap.add_argument("--cover", help="封面图路径（JPEG）")
     args = ap.parse_args(argv)
 
@@ -132,7 +149,7 @@ def main(argv=None) -> int:
         outs = convert_file(
             args.txt, out_dir=args.out, title=args.title, author=args.author,
             max_per_volume=args.max_per_volume, encoding=args.encoding,
-            cover_image=cover,
+            cover_image=cover, no_volume=args.no_volume,
         )
     except Exception as e:  # noqa: BLE001 — CLI 层统一兜底报错
         print(f"[错误] {e}", file=sys.stderr)

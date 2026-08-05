@@ -293,13 +293,18 @@ def build_epub(
     author: str,
     lang: str = "zh-CN",
     cover_image: Optional[bytes] = None,
+    volumes: Optional[List[Tuple[str, List[int]]]] = None,
 ):
     """构建 EPUB 电子书对象
 
     cover_image: JPEG bytes 用于封面图，None 则不嵌入封面图
+    volumes: 由 detect_volumes() 返回的 [(卷名, [章节下标...]), ...]；
+             提供时生成『卷→章』嵌套 TOC（长篇网文目录体验更好，借鉴 legado）；
+             None 时退回扁平一级 TOC（与旧版一致）。
     """
     book, spine = _new_book(book_title, author, lang, cover_image)
 
+    # 章节 EpubHtml 始终创建并加入 spine/book；TOC 组装方式才因 volumes 而不同
     toc = []
     for idx, (title, text) in enumerate(chapters, 1):
         c = epub.EpubHtml(
@@ -316,7 +321,18 @@ def build_epub(
         toc.append(epub.Link(f"chap_{idx:03d}.xhtml", title, f"chap_{idx}"))
         spine.append(c)
 
-    book.toc = tuple(toc)
+    if volumes:
+        # 嵌套 TOC：每个卷作父节点，其下挂章节（EbookLib 用 (父, (子...)) 元组表达层级）
+        nested = []
+        for i, (vtitle, members) in enumerate(volumes):
+            children = tuple(toc[idx] for idx in members)
+            # 父节点指向该卷首章（真实存在的目标），卷名作为分组标题
+            parent = epub.Link(f"chap_{members[0] + 1:03d}.xhtml", vtitle, f"vol_{i}")
+            nested.append((parent, children))
+        book.toc = tuple(nested)
+    else:
+        book.toc = tuple(toc)
+
     book.spine = spine
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
@@ -350,6 +366,92 @@ def volume_ranges(n_items: int, max_per_volume: int):
         return [(0, n_items)]
     return [(s, min(s + max_per_volume, n_items))
             for s in range(0, n_items, max_per_volume)]
+
+
+# 卷标记：第X卷（阿拉伯/中文数字）
+_VOL_PAT = re.compile(r"第\s*[0-9零一二三四五六七八九十百千]+\s*卷")
+# 卷名行允许的边界字符（书名号/括号/空格/全角空格）
+_VOL_TRIM = str.maketrans("", "", "【】()（）[] \u3000\t\r")
+# 正文里若出现这些字，说明那不是独立的卷标记行（如「第三卷第十四章有提到」）
+_VOL_BODY_KW = ("章", "回", "节", "部")
+
+
+def _is_volume_line(line: str) -> bool:
+    """判断一行是不是『独立的卷标记行』（而非正文里顺带提到的卷）。
+
+    例如「【第一卷】」算；「（第三卷第十四章有提到）」不算（含『章』且是叙述）。
+    """
+    cleaned = line.translate(_VOL_TRIM)
+    if re.fullmatch(r"第[0-9零一二三四五六七八九十百千]+卷", cleaned):
+        return True
+    # 允许「第X卷 副名」这类，但必须不含 章/回/节/部，且足够短
+    if (cleaned.startswith("第") and "卷" in cleaned
+            and not any(k in cleaned for k in _VOL_BODY_KW)
+            and len(cleaned) <= 12):
+        return True
+    return False
+
+
+def detect_volumes(index, source, encoding):
+    """按章节索引的字节偏移 + 源文本，扫描「第X卷」独立行做卷→章分组。
+
+    返回 List[Tuple[vol_title, List[chap_index]]]（chap_index 为章节在 index/chapters
+    中的下标，0 基）。用于单文件嵌套 TOC（卷→章），借鉴 legado 的 TableOfContents 层级模型。
+
+    为何不用标题匹配：网文 TXT 常有角色属性表等被误判成「章」的条目，且多字节/CRLF 下
+    逐标题 str.find 顺序匹配大面积失效（实测覆盖率仅 0.4）。故改为字节偏移对齐——
+    直接拿 parse_txt_index 每章的 start 字节偏移换算成字符位置，与卷标记字符位置比较，
+    完全不依赖标题文本，三种索引模式（管道 UTF-8 / raw 原编码 / legacy UTF-8 临时文件）均正确：
+    - 管道模式：source 为 Utf8Buffer，offset 即其 .data 的 UTF-8 字节偏移；
+    - raw 模式：source 为原文件路径，index 项带 encoding 字段，offset 为原编码字节偏移；
+    - legacy：source 为 UTF-8 临时文件，index 无 encoding 字段，按 UTF-8 解码。
+
+    安全性：无卷标记、或卷内无章节（异常）时返回空列表 —— 调用方据此退回扁平 TOC，
+    与现版行为完全一致（零回归）。
+    """
+    if not index:
+        return []
+    # 1) 确定解码方式：raw 模式 index 项带 encoding；否则 UTF-8
+    raw_enc = index[0].get("encoding") or "utf-8"
+    # 2) 取源字节并解码为文本（字符空间）
+    if isinstance(source, Utf8Buffer):
+        src_bytes = source.data
+    else:
+        with open(source, "rb") as f:
+            src_bytes = f.read()
+    dec = src_bytes.decode(raw_enc, errors="replace")
+    # 3) 每章的字符偏移：src 前 start 字节解码后得到的字符数
+    chap_char = [len(src_bytes[:max(0, int(e["start"]))].decode(raw_enc, "replace"))
+                 for e in index]
+    # 4) 卷标记（仅取独立行）
+    vol_marks = []  # (vol_name, char_pos)
+    nl = "\n"
+    for m in _VOL_PAT.finditer(dec):
+        line_start = dec.rfind(nl, 0, m.start()) + 1
+        line_end = dec.find(nl, m.start())
+        if line_end == -1:
+            line_end = len(dec)
+        line = dec[line_start:line_end].strip()
+        if _is_volume_line(line):
+            vol_marks.append((line, line_start))
+    if not vol_marks:
+        return []
+    # 5) 归属：第 k 卷区间 [vstart, vnext)
+    vol_starts = [v[1] for v in vol_marks]
+    boundaries = vol_starts + [len(dec) + 1]
+    groups = []
+    for k, (vname, vstart) in enumerate(vol_marks):
+        vnext = boundaries[k + 1]
+        members = [ci for ci, cp in enumerate(chap_char) if vstart <= cp < vnext]
+        groups.append((vname, members))
+    # 6) 首个卷之前的章节归入「正文」组（如有）
+    leading = [ci for ci, cp in enumerate(chap_char) if cp < vol_starts[0]]
+    if leading:
+        groups.insert(0, ("正文", leading))
+    # 异常兜底：若所有卷都无章节（offset 错位等），退回扁平
+    if all(not m for _, m in groups):
+        return []
+    return groups
 
 
 def convert_single(
@@ -851,12 +953,14 @@ def pack_chapters(temp_path, index, out_dir, toc_pattern=None, book_title="", en
 
 
 def build_epub_from_pack(out_dir, manifest_path, book_title, author,
-                         lang="zh-CN", cover_image=None, chapters_subset=None):
+                         lang="zh-CN", cover_image=None, chapters_subset=None,
+                         volumes=None):
     """按 Rust --pack 产出的 manifest.json + xhtml 小文件组装 EPUB。
 
     章节正文已在 xhtml 文件中（最终内容），Python 只做「按打包指南组装」：
     读 manifest 顺序、逐个读 xhtml 喂给 ebooklib，内存恒定，不再流式读源。
     chapters_subset：多卷拆分时只组装该子集（list[chapter dict]），顺序须合法。
+    volumes：同 build_epub，提供时生成『卷→章』嵌套 TOC（None 则扁平）。
     """
     with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
@@ -871,7 +975,15 @@ def build_epub_from_pack(out_dir, manifest_path, book_title, author,
         book.add_item(c)
         toc.append(epub.Link(ch["file"], ch["title"], f"chap_{i}"))
         spine.append(c)
-    book.toc = tuple(toc)
+    if volumes:
+        nested = []
+        for k, (vtitle, members) in enumerate(volumes):
+            children = tuple(toc[idx] for idx in members)
+            parent = epub.Link(chapters[members[0]]["file"], vtitle, f"vol_{k}")
+            nested.append((parent, children))
+        book.toc = tuple(nested)
+    else:
+        book.toc = tuple(toc)
     book.spine = spine
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
