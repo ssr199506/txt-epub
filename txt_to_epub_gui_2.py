@@ -97,6 +97,7 @@ from txt_to_epub_core import (  # noqa: E402
     HAVE_PIL,
 )
 from hierarchy_rules import build_hierarchy as _build_hierarchy
+from encoding_detect import detect_encoding  # 编码择优：拖入即自动定码，告别默认 utf-8 乱码
 from ebooklib import epub as _epub  # noqa: E402 — 依赖已在上方验证
 from tkinterdnd2 import DND_FILES, TkinterDnD  # noqa: E402
 
@@ -337,7 +338,7 @@ class App(TkinterDnD.Tk):
         self.cmb_enc = ttk.Combobox(
             f_enc,
             textvariable=self.encoding,
-            values=["utf-8", "utf-16", "gb2312", "gbk", "gb18030", "big5", "shift_jis"],
+            values=["utf-8", "utf-8-sig", "utf-16", "gb2312", "gbk", "gb18030", "big5", "shift_jis"],
             width=12, state="readonly",
         )
         self.cmb_enc.pack(side="left", padx=(0, 12))
@@ -1157,6 +1158,17 @@ class App(TkinterDnD.Tk):
     # ================================================================
     # 模式切换
     # ================================================================
+    def _auto_detect_encoding(self, file_path: str) -> str:
+        """加载时自动择优检测编码：拖入即定码，预览/解析/转换全程用正确编码。
+
+        检测失败或无中文信号时退回 gb18030（中文网文最可能是它），避免默认 utf-8 乱码。
+        """
+        try:
+            enc, _conf = detect_encoding(file_path)
+            return enc
+        except Exception:
+            return "gb18030"
+
     def _switch_to_single(self, file_path: str):
         self.batch_files = []
         self.is_batch_mode = False
@@ -1167,6 +1179,8 @@ class App(TkinterDnD.Tk):
             self.book_title.set(Path(file_path).stem)
         out_default = Path(file_path).with_suffix(".epub")
         self.out_path.set(str(out_default))
+        # 自动检测编码：拖入即定，预览/解析/转换都用正确编码，不再默认 utf-8 乱码
+        self.encoding.set(self._auto_detect_encoding(file_path))
         self.refresh_preview()
 
         # 自动解析章节
@@ -1175,15 +1189,16 @@ class App(TkinterDnD.Tk):
     def _switch_to_batch(self, files: list[str]):
         self.batch_files = files
         self.is_batch_mode = True
-        # 初始化每文件的独立编码（保留原有编码设置，或继承全局 encoding）
-        enc = self.encoding.get()
-        self._file_encodings = {f: enc for f in files}
+        # 逐文件自动检测编码（不再统一继承全局 utf-8）
+        self._file_encodings = {f: self._auto_detect_encoding(f) for f in files}
         self.file_listbox.delete(0, tk.END)
         for f in files:
             self.file_listbox.insert(tk.END, Path(f).name)
 
         first = files[0]
         self.txt_path.set(first)
+        # 当前预览编码同步为该文件检测结果
+        self.encoding.set(self._file_encodings[first])
         if not self.out_path.get():
             self.out_path.set(str(Path(first).parent / "epub_output"))
         self.refresh_preview()
