@@ -1,7 +1,9 @@
 """任务模型与切分。
 
-纯 Python，零 Rust 依赖。复用了 txt_to_epub_core 的 _count_lines 与 v1.0.0 的
-_CHUNK_CONFIG / _get_optimal_chunks 查表逻辑（后者原在 gui_2.py，这里内联以免引入 tkinter）。
+纯 Python，零 Rust 依赖。行数统计复用 txt_to_epub_core._count_lines；
+分段不用 v1.0.0 的固定查表（_CHUNK_CONFIG），改按「甜点区」计算：
+单 worker 一次持有约 SWEET_SPOT_BYTES 正文，段数 = ceil(文件大小 / 甜点区)，
+大文件自然多段，并行度由全局队列按空闲 worker 动态分配。
 
 设计红线（见 plan/global_scheduler_plan.md）：
 - P5 传引用不传数据：TaskDescriptor 只携带路径+行号+编码等标量，正文由 worker 自读磁盘。
@@ -17,24 +19,17 @@ from pathlib import Path
 
 from txt_to_epub_core import _count_lines, TOC_RE
 
-# ---- 分段查表（与 v1.0.0 gui_2._CHUNK_CONFIG 一致）----
-# (文件大小阈值字节, 分段数)；小于阈值取对应段数，全都不命中默认 6。
-_CHUNK_CONFIG = [
-    (512 * 1024, 1),        # < 512KB：不切
-    (2 * 1024 * 1024, 2),   # < 2MB：2 段
-    (5 * 1024 * 1024, 3),
-    (10 * 1024 * 1024, 4),
-    (20 * 1024 * 1024, 5),
-    (50 * 1024 * 1024, 6),
-]
+# ---- 甜点区分段（取代 v1.0.0 的固定查表 _CHUNK_CONFIG）----
+# 单 worker 一次持有的理想正文量：太大则单段内存峰值高，太小则任务粒度碎、
+# 合并开销占比上升。段数 = ceil(文件大小 / 甜点区)，大文件自然多段、无写死上限。
+SWEET_SPOT_BYTES = int(os.environ.get("GS_SWEET_SPOT_MB", "256")) * 1024 * 1024
 
 
 def get_optimal_chunks(file_size: int) -> int:
-    """根据文件大小查表确定最优分段数（复刻 v1.0.0 逻辑）。"""
-    for threshold, chunks in _CHUNK_CONFIG:
-        if file_size < threshold:
-            return chunks
-    return 6
+    """按甜点区计算分段数：至少 1 段；小文件不切，大文件按 256MB/段 递增。"""
+    if file_size <= 0:
+        return 1
+    return max(1, (file_size + SWEET_SPOT_BYTES - 1) // SWEET_SPOT_BYTES)
 
 
 @dataclass
@@ -86,7 +81,7 @@ class TaskDescriptor:
 def split_file(fm: FileMeta, pattern_str: str | None = None) -> list[TaskDescriptor]:
     """把一个文件切成若干 TaskDescriptor。
 
-    切分依据：文件大小 → 最优段数；行数 → 均匀行边界。
+    切分依据：文件大小 → 甜点区分段数；行数 → 均匀行边界。
     返回空列表表示文件无内容（total_lines == 0）。
     """
     if not pattern_str:
