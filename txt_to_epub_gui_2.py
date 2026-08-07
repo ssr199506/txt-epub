@@ -130,6 +130,7 @@ def _is_parallel_available() -> bool:
 class App(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
+        self.title("TXT→ePub 批量处理小助手")
         self.geometry("950x750")
         self.minsize(750, 600)
         self.resizable(True, True)
