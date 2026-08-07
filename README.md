@@ -27,16 +27,17 @@ python txt_to_epub_gui_2.py    # 或双击 run_gui.bat 一键启动
 
 ## 版本迭代
 
-| 版本 | 位置 | 说明 |
-|------|------|------|
-| v1 纯 Python | Release `v1.0.0` | 初始版，不依赖 Rust（纯 Python 直接运行） |
-| v2 Rust 加速 | Release `v2.0.0` | 引入 Rust 解析内核的稳定快照（需自行 `cargo build` 生成 exe） |
-| v3 当前版 | 仓库根目录 / Release `v3.0.0` | 管道架构 + 批处理引擎 + 编码择优 + 嵌套目录 |
+演进主线：**v1 纯 Python** → **v2 Rust 加速** → **v3 管道 / 批处理（当前版）**
 
-历史版本（v1.0.0 / v2.0.0）已发布为 GitHub Releases，源码快照可随时取用。演进主线：纯 Python → Rust 加速（成功）→ raw_offsets 实验（否决）→ 管道 / 批处理（前进方向）。
+| 版本 | 类型 | 说明 | 预编译 exe |
+|------|------|------|-----------|
+| `v1.0.0` 纯 Python 初始版 | 源码快照 | 不依赖 Rust，纯 Python 直接运行 GUI | 无 |
+| `v2.0.0` Rust 加速 | 源码快照 | 引入 Rust 解析内核（需 `cargo build --release` 自行生成 exe） | 无 |
+| `v3.0.0` 当前版 | 仓库根目录 + Release | 管道架构 + 批处理引擎(--serve) + 编码择优 + 嵌套目录 TOC | 有（Windows x64） |
 
-> **`pure-python-beta` 分支（探索性，暂不并入 main）**：方向性复盘产物。海量 10MB 级小说场景下 Rust 加速优势全部落空，用户理想模型（不成环数据线 / 任意切分 / 编码分链 / 核数=进程数 / 动态资源分配）**纯 Python 100% 可实现**。该分支用 v1.0.0 纯 Python 引擎替换 core 的 Rust 委派，保留 main 上的 `encoding_detect.py`（编码择优）与 `hierarchy_rules.py`（分层目录），并新增 `global_scheduler/` 包（全局进程池常驻 + 跨文件任务队列）。验证：89 本真实小说全量，89/89 成功、0 失败，编码分链实证 3 条链，与原版逐章 parity 一致。详见仓库内 `README_full.md` 第十一节。
+历史版本 `v1.0.0` / `v2.0.0` 已发布为 GitHub Releases，均为源码快照、未附预编译 exe，可随时取用；`v3.0.0` 附带 Windows x64 预编译内核。
 
+> **`pure-python-beta` 分支已并入 main（当前版）**：方向性复盘产物。海量 10MB 级小说场景下 Rust 加速优势全部落空，用户理想模型（不成环数据线 / 任意切分 / 编码分链 / 核数=进程数 / 动态资源分配）**纯 Python 100% 可实现**。当前 main 用 v1.0.0 纯 Python 引擎替换 core 的 Rust 委派，保留 `encoding_detect.py`（编码择优）与 `hierarchy_rules.py`（分层目录），并新增 `global_scheduler/` 包（全局进程池常驻 + 跨文件任务队列）。验证：89 本真实小说全量，89/89 成功、0 失败，编码分链实证 3 条链，与原版逐章 parity 一致。详见仓库内 `README_full.md` 第十一节。
 ## 设计思路
 
 面向 845 GB / 25 万文件规模，架构由三个关键决策决定：
