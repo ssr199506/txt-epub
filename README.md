@@ -27,13 +27,15 @@ python txt_to_epub_gui_2.py    # 或双击 run_gui.bat 一键启动
 
 ## 版本迭代
 
-| 版本 | 位置 | 说明 |
-|------|------|------|
-| v1 纯 Python | Release `v1.0.0` | 初始版，不依赖 Rust（纯 Python 直接运行） |
-| v2 Rust 加速 | Release `v2.0.0` | 引入 Rust 解析内核的稳定快照（需自行 `cargo build` 生成 exe） |
-| v3 当前版 | 仓库根目录 / Release `v3.0.0` | 管道架构 + 批处理引擎 + 编码择优 + 嵌套目录 |
+演进主线：**v1 纯 Python** → **v2 Rust 加速** → **v3 管道 / 批处理（当前版）**
 
-历史版本（v1.0.0 / v2.0.0）已发布为 GitHub Releases，源码快照可随时取用。演进主线：纯 Python → Rust 加速（成功）→ raw_offsets 实验（否决）→ 管道 / 批处理（前进方向）。
+| 版本 | 类型 | 说明 | 预编译 exe |
+|------|------|------|-----------|
+| `v1.0.0` 纯 Python 初始版 | 源码快照 | 不依赖 Rust，纯 Python 直接运行 GUI | 无 |
+| `v2.0.0` Rust 加速 | 源码快照 | 引入 Rust 解析内核（需 `cargo build --release` 自行生成 exe） | 无 |
+| `v3.0.0` 当前版 | 仓库根目录 + Release | 管道架构 + 批处理引擎(--serve) + 编码择优 + 嵌套目录 TOC | 有（Windows x64） |
+
+历史版本 `v1.0.0` / `v2.0.0` 已发布为 GitHub Releases，均为源码快照、未附预编译 exe，可随时取用；`v3.0.0` 附带 Windows x64 预编译内核。
 
 ## 设计思路
 
