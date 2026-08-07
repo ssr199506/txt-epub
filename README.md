@@ -36,7 +36,6 @@ python txt_to_epub_gui_2.py    # 或双击 run_gui.bat 一键启动
 | `v3.0.0` 当前版 | 仓库根目录 + Release | 管道架构 + 批处理引擎(--serve) + 编码择优 + 嵌套目录 TOC | 有（Windows x64） |
 
 历史版本 `v1.0.0` / `v2.0.0` 已发布为 GitHub Releases，均为源码快照、未附预编译 exe，可随时取用；`v3.0.0` 附带 Windows x64 预编译内核。
-
 ## 设计思路
 
 面向 845 GB / 25 万文件规模，架构由三个关键决策决定：
