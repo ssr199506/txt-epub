@@ -29,11 +29,11 @@ python txt_to_epub_gui_2.py    # 或双击 run_gui.bat 一键启动
 
 | 版本 | 位置 | 说明 |
 |------|------|------|
-| v1 纯 Python | `versions/1_pure_python/` | 初始版，不依赖 Rust |
-| v2 Rust 加速 | `versions/2_rust_accel/` | 引入 Rust 解析内核的稳定快照 |
-| v3 当前版 | 仓库根目录 | 管道架构 + 批处理引擎 + 编码择优 + 嵌套目录 |
+| v1 纯 Python | Release `v1.0.0` | 初始版，不依赖 Rust（纯 Python 直接运行） |
+| v2 Rust 加速 | Release `v2.0.0` | 引入 Rust 解析内核的稳定快照（需自行 `cargo build` 生成 exe） |
+| v3 当前版 | 仓库根目录 / Release `v3.0.0` | 管道架构 + 批处理引擎 + 编码择优 + 嵌套目录 |
 
-历史版本全部归档于 `versions/`，可随时回退。演进主线：纯 Python → Rust 加速（成功）→ raw_offsets 实验（否决）→ 管道 / 批处理（前进方向）。
+历史版本（v1.0.0 / v2.0.0）已发布为 GitHub Releases，源码快照可随时取用。演进主线：纯 Python → Rust 加速（成功）→ raw_offsets 实验（否决）→ 管道 / 批处理（前进方向）。
 
 ## 设计思路
 
@@ -73,7 +73,6 @@ python txt_to_epub_gui_2.py    # 或双击 run_gui.bat 一键启动
 | `parse_txt_rust.exe` | 预编译 Rust 内核（release 构建，无需 Rust 环境） |
 | `rust/` | Rust 内核源码（`cargo build --release` 可自行编译） |
 | `exportTxtTocRule..json` | 章节识别规则集（**文件名是两个点**，须与脚本同目录） |
-| `versions/` | 历史版本归档（v1 / v2） |
 
 章节切分由 `exportTxtTocRule..json` 中的正则规则驱动（内置通用 / 晋江等多组规则按优先级匹配），可按需增删自定义。
 
