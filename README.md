@@ -35,6 +35,8 @@ python txt_to_epub_gui_2.py    # 或双击 run_gui.bat 一键启动
 
 历史版本（v1.0.0 / v2.0.0）已发布为 GitHub Releases，源码快照可随时取用。演进主线：纯 Python → Rust 加速（成功）→ raw_offsets 实验（否决）→ 管道 / 批处理（前进方向）。
 
+> **`pure-python-beta` 分支（探索性，暂不并入 main）**：方向性复盘产物。海量 10MB 级小说场景下 Rust 加速优势全部落空，用户理想模型（不成环数据线 / 任意切分 / 编码分链 / 核数=进程数 / 动态资源分配）**纯 Python 100% 可实现**。该分支用 v1.0.0 纯 Python 引擎替换 core 的 Rust 委派，保留 main 上的 `encoding_detect.py`（编码择优）与 `hierarchy_rules.py`（分层目录），并新增 `global_scheduler/` 包（全局进程池常驻 + 跨文件任务队列）。验证：89 本真实小说全量，89/89 成功、0 失败，编码分链实证 3 条链，与原版逐章 parity 一致。详见仓库内 `README_full.md` 第十一节。
+
 ## 设计思路
 
 面向 845 GB / 25 万文件规模，架构由三个关键决策决定：
@@ -82,6 +84,16 @@ python txt_to_epub_gui_2.py    # 或双击 run_gui.bat 一键启动
 - **章节识别不对**：检查规则文件是否与脚本同目录
 - **编码乱码**：预览里手动切到正确编码（常见 utf-8 / gbk）再转换
 - **Rust 引擎未找到**：检查 `parse_txt_rust.exe` 是否与脚本同目录、是否被杀毒软件隔离
+
+## pure-python-beta 探索分支（纯 Python 全局调度器）
+
+`pure-python-beta` 是一次方向性复盘产物：真实场景（海量 10MB 级小说、16–32 核、内存充足、任务粒度=整文件）下，Rust 加速的优势全部落空——瓶颈是进程启动与串行喂数据，而非单节点解码速度。用户理想模型（不成环的数据线、任意切分、编码分链、核数=进程数、动态资源分配）**纯 Python 100% 可实现**，不需要 Rust。
+
+- **基底**：从 main 分出，用 v1.0.0 纯 Python 引擎替换 `core.py`/`gui_2.py` 的 Rust 委派，保留 main 上的纯 Python 有益探索（`encoding_detect.py` 编码择优、`hierarchy_rules.py` 分层目录），零 Rust 引用。
+- **新增 `global_scheduler/` 包**（纯 Python）：预扫分链 + 全局进程池常驻 + 跨文件任务队列 + 动态收集；任务单元传引用（路径+行号），正文不跨进程。
+- **验证**：89 本真实小说全量，89/89 成功、0 失败；编码分链实证 3 条链（utf-8 / utf-8-sig / gb18030）；与原版逐章 parity 一致。
+- **核心教训**：① 非瓶颈上不发力——加速最不卡的一环是方向错误；② 报开销必带摊销方案（进程池常驻即可摊薄启动税，无需 Rust）；③ "多线程"= threading（GIL 锁死）+ multiprocessing（真并行），两者混为一谈会把人带进死胡同。
+- 该分支暂不并入 main，作为独立探索保留。
 
 ## 许可
 

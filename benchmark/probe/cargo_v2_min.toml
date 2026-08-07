@@ -1,0 +1,25 @@
+# v2.0.0 重建的最小 Cargo.toml（公平性测试用）
+# 说明：v2 的 rust_src/ 原版只有 .rs 源码、无 Cargo.toml。
+# 本文件按 v3 的工程结构重建，仅声明编译目标与依赖，未改动任何源码。
+# 依赖仅含 v2 源码实际用到的 fancy-regex + serde_json；不引入 v2 没有的 rayon/encoding_rs。
+
+[package]
+name = "txt_rust_engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "txt_engine"
+path = "lib.rs"
+
+[[bin]]
+name = "parse_txt_rust"
+path = "main.rs"
+
+[[bin]]
+name = "parse_txt_probe"
+path = "probe.rs"
+
+[dependencies]
+fancy-regex = "0.13"
+serde_json = "1"

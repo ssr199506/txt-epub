@@ -6,8 +6,6 @@ TXT→ePub 批量处理版（编码实时预览 & 章节预览 & 全编码支持
 """
 import os
 import pickle
-import tempfile
-import shutil
 import sys
 import subprocess
 import tkinter as tk
@@ -17,7 +15,6 @@ from pathlib import Path
 from uuid import uuid4
 import threading
 import queue
-import json
 from typing import Optional
 
 # ===================================================================
@@ -83,22 +80,14 @@ from txt_to_epub_core import (  # noqa: E402
     TOC_RE,
     parse_txt,
     build_epub,
-    build_epub_from_pack,
-    volume_ranges,
     convert_single,
     ConversionResult,
     load_toc_rules,
-    parse_txt_index,
-    read_chapter,
-    pack_chapters,
-    Utf8Buffer,
     _count_lines,
     _parse_chunk,
     _crop_cover_image,
     HAVE_PIL,
 )
-from hierarchy_rules import build_hierarchy as _build_hierarchy
-from encoding_detect import detect_encoding  # 编码择优：拖入即自动定码，告别默认 utf-8 乱码
 from ebooklib import epub as _epub  # noqa: E402 — 依赖已在上方验证
 from tkinterdnd2 import DND_FILES, TkinterDnD  # noqa: E402
 
@@ -110,18 +99,6 @@ if HAVE_PIL:
 # 章节规则 JSON 路径
 # ===================================================================
 TOC_RULES_JSON = Path(__file__).resolve().parent / "exportTxtTocRule..json"
-
-
-def _nested_volumes(titles):
-    """由章节标题序列计算嵌套分组（数据驱动分层引擎 build_hierarchy）。
-
-    扁平书（无卷/部/篇/集标记）返回 []，调用方据此退回扁平 TOC，零回归。
-    titles 必须与传给 build_epub / build_epub_from_pack 的 chapters 同序，
-    返回的 0 基下标才正确指向上述 chapters。
-    """
-    if not titles:
-        return []
-    return _build_hierarchy([{"title": t} for t in titles])
 
 
 # ===================================================================
@@ -164,14 +141,10 @@ class App(TkinterDnD.Tk):
         self.book_title = tk.StringVar()
         self.author = tk.StringVar(value="Unknown")
         self.encoding = tk.StringVar(value="utf-8")
-        self.max_chapters_per_volume = tk.IntVar(value=0)  # 0 = 不拆分
-        self._last_outputs = []  # 最近一次生成的输出路径（多卷时为多路径）
         self.batch_files: list[str] = []
         self._file_encodings: dict[str, str] = {}  # 批量模式下每文件的独立编码
         self.is_batch_mode = False
-        self.chapters: list = []    # (标题, 正文, 索引项) 三元组；正文初始空、按需懒加载
-        self._temp_path = None      # 轻量索引对应的 UTF-8 临时文件（read_chapter / pack 按偏移 seek）
-        self._chapters_edited = False  # 是否发生过删除合并（发生则生成走 build_epub 回退）
+        self.chapters: list[tuple[str, str]] = []  # 解析后的章节列表
         self._full_text = ""        # 正文预览的完整文本缓存
         self._preview_pos = 0       # 已加载到预览框的字符位置
         self._cached_encoding = ""  # 预览时使用的编码（用于检测缓存失效）
@@ -339,7 +312,7 @@ class App(TkinterDnD.Tk):
         self.cmb_enc = ttk.Combobox(
             f_enc,
             textvariable=self.encoding,
-            values=["utf-8", "utf-8-sig", "utf-16", "gb2312", "gbk", "gb18030", "big5", "shift_jis"],
+            values=["utf-8", "utf-16", "gb2312", "gbk", "gb18030", "big5", "shift_jis"],
             width=12, state="readonly",
         )
         self.cmb_enc.pack(side="left", padx=(0, 12))
@@ -383,15 +356,6 @@ class App(TkinterDnD.Tk):
         )
         self.cmb_toc_rule.pack(side="left", padx=(0, 10))
         self.cmb_toc_rule.bind("<<ComboboxSelected>>", self._on_rule_changed)
-
-        # 多卷拆分选项（借鉴 legado 的大书分卷；默认 0=不拆分）
-        ttk.Label(toc_ctrl, text="  每卷章数：").pack(side="left")
-        self.spin_vol = ttk.Spinbox(
-            toc_ctrl, from_=0, to=2000, increment=50,
-            textvariable=self.max_chapters_per_volume, width=6,
-        )
-        self.spin_vol.pack(side="left", padx=(0, 4))
-        ttk.Label(toc_ctrl, text="（0=不拆分）").pack(side="left")
 
         self.parse_btn = tk.Button(
             toc_ctrl,
@@ -661,82 +625,31 @@ class App(TkinterDnD.Tk):
     # 章节解析
     # ================================================================
     def _parse_chapters(self, _event=None):
-        """异步解析章节（轻量索引：只回传标题+偏移，正文按需懒加载，不冻 UI）。"""
+        """使用当前选中的规则解析章节（优先使用内存 _full_text 避免重复读盘）"""
         txt = Path(self.txt_path.get())
         if not txt.is_file():
             messagebox.showinfo("提示", "请先选择 TXT 文件")
             return
 
         pattern = self._get_selected_pattern()
-        # 仅当 _full_text 的编码与当前编码一致时才复用内存文本（避免重复读盘/解码）
-        text_for_parse = (
-            self._full_text
-            if self._full_text and self.encoding.get() == self._cached_encoding
-            else None
-        )
-        self._parse_async(txt, self.encoding.get(), pattern, text_for_parse)
-
-    def _parse_async(self, txt, enc, pattern, text_str):
-        """后台线程跑轻量索引；解析期间列表框显示「解析中…」，不阻塞 UI。"""
-        self.chapter_listbox.delete(0, tk.END)
-        self.label_chapter_count.config(text="解析中…")
-        def worker():
-            try:
-                if text_str is not None:
-                    temp, index = parse_txt_index(text_str=text_str, toc_pattern=pattern)
-                else:
-                    # raw_offsets 模式已实装但因 encoding_rs 与 Python gbk codec 对非法字节解码不一致，
-                    # 在 GBK 书上漏切章节、UTF-8 书上正文近半对不上（见 _parity.py，总一致率 71.7%），
-                    # 存在真实回归，暂不启用；默认走 legacy（写 UTF-8 temp）路径，与 backup_pre_raw 行为一致。
-                    temp, index = parse_txt_index(txt, enc, toc_pattern=pattern)
-                self._parse_result = (temp, index, None)
-            except Exception as e:
-                self._parse_result = (None, None, e)
-            self.after(0, self._on_parse_done)
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_parse_done(self):
-        temp, index, err = self._parse_result
-        if err is not None:
+        try:
+            # 仅当 _full_text 的编码与当前编码一致时才复用缓存
+            text_for_parse = (
+                self._full_text
+                if self._full_text and self.encoding.get() == self._cached_encoding
+                else None
+            )
+            self.chapters = parse_txt(
+                txt, self.encoding.get(),
+                toc_pattern=pattern,
+                text_str=text_for_parse,
+            )
+        except Exception as e:
             self.chapters = []
-            self._temp_path = None
-            self._chapters_edited = False
-            self.label_chapter_count.config(text="0")
-            messagebox.showerror("解析失败", f"章节解析出错：{err}")
+            messagebox.showerror("解析失败", f"章节解析出错：{e}")
             return
-        # 清理上一轮的临时文件
-        old = self._temp_path
-        self._temp_path = temp
-        # 护栏：raw 模式下 self._temp_path 是【用户原书】（非临时文件），绝不能删！
-        # 只有本工具自己生成的 txt_epub_ 前缀临时文件才清理，避免误删源文件。
-        if old and old != temp and not isinstance(old, Utf8Buffer) \
-                and "txt_epub_" in os.path.basename(str(old)):
-            try:
-                os.remove(old)
-            except OSError:
-                pass
-        self._chapters_edited = False
-        # 3 元组：(标题, 正文(懒加载), 索引项)；正文留空，双击/生成时按需取
-        self.chapters = [(e["title"], "", e) for e in index]
+
         self._refresh_chapter_listbox()
-
-    def _get_body(self, idx):
-        """按需读取某章正文（懒加载 + 缓存）；无索引项时回退空串。"""
-        ch = self.chapters[idx]
-        if ch[1]:
-            return ch[1]
-        entry = ch[2]
-        if entry and self._temp_path:
-            body = read_chapter(self._temp_path, entry)
-            self.chapters[idx] = (ch[0], body, entry)
-            return body
-        return ""
-
-    def _ensure_all_bodies(self):
-        """编辑场景下生成前补齐所有正文（仅编辑过才调用，罕见路径）。"""
-        for i, ch in enumerate(self.chapters):
-            if not ch[1] and ch[2] and self._temp_path:
-                self.chapters[i] = (ch[0], read_chapter(self._temp_path, ch[2]), ch[2])
 
     def _on_rule_changed(self, _event=None):
         """切换规则后自动重解析"""
@@ -747,8 +660,7 @@ class App(TkinterDnD.Tk):
     def _refresh_chapter_listbox(self):
         """刷新章节列表框显示"""
         self.chapter_listbox.delete(0, tk.END)
-        for idx, ch in enumerate(self.chapters, 1):
-            title = ch[0]
+        for idx, (title, _) in enumerate(self.chapters, 1):
             display = f"{idx}. {title}" if title else f"{idx}. (无标题)"
             self.chapter_listbox.insert(tk.END, display)
         self.label_chapter_count.config(text=str(len(self.chapters)))
@@ -995,7 +907,7 @@ class App(TkinterDnD.Tk):
         if idx >= len(self.chapters) or not self._full_text:
             return
 
-        title = self.chapters[idx][0]
+        title, content = self.chapters[idx]
 
         # 在原文中定位章节标题
         pos = self._full_text.find(title.strip())
@@ -1012,14 +924,7 @@ class App(TkinterDnD.Tk):
 
         # 预计算行号（基于 _full_text，不受预览加载进度影响）
         line_num = self._full_text[:pos].count("\n") + 1
-        # 需要加载到的位置：优先用下一章起点（偏移）估计，避免仅为求长度而懒加载正文
-        entry = self.chapters[idx][2]
-        if entry and idx + 1 < len(self.chapters) and self.chapters[idx + 1][2]:
-            need = self.chapters[idx + 1][2]["start"] + 200
-        elif entry:
-            need = pos + len(self._get_body(idx)) + 200
-        else:
-            need = pos + 200
+        need = pos + len(content) + 200
 
         if need <= self._preview_pos:
             self._scroll_to_line(line_num)
@@ -1051,20 +956,16 @@ class App(TkinterDnD.Tk):
         """直接删除章节（内容合并到上一章），保存撤销信息"""
         if idx <= 0:
             return  # 第一章不能删，静默忽略
-        # 合并前先懒加载涉及的章正文（轻量索引下正文初始为空）
-        prev_body = self._get_body(idx - 1)
-        curr_body = self._get_body(idx)
-        # 保存撤销信息（保留原始元组，含索引项）
+        # 保存撤销信息
         curr = self.chapters[idx]
         prev = self.chapters[idx - 1]
         self._delete_history.append((idx, curr, prev))
         if len(self._delete_history) > 20:
             self._delete_history.pop(0)
 
-        # 内容合并到上一章；索引项置空标记已编辑（生成时回退 build_epub）
-        self.chapters[idx - 1] = (prev[0], prev_body + "\n" + curr_body, None)
+        # 内容合并到上一章
+        self.chapters[idx - 1] = (prev[0], prev[1] + "\n" + curr[1])
         del self.chapters[idx]
-        self._chapters_edited = True
 
         scroll_frac = self.chapter_listbox.yview()[0]
         self._refresh_chapter_listbox()
@@ -1159,17 +1060,6 @@ class App(TkinterDnD.Tk):
     # ================================================================
     # 模式切换
     # ================================================================
-    def _auto_detect_encoding(self, file_path: str) -> str:
-        """加载时自动择优检测编码：拖入即定码，预览/解析/转换全程用正确编码。
-
-        检测失败或无中文信号时退回 gb18030（中文网文最可能是它），避免默认 utf-8 乱码。
-        """
-        try:
-            enc, _conf = detect_encoding(file_path)
-            return enc
-        except Exception:
-            return "gb18030"
-
     def _switch_to_single(self, file_path: str):
         self.batch_files = []
         self.is_batch_mode = False
@@ -1180,8 +1070,6 @@ class App(TkinterDnD.Tk):
             self.book_title.set(Path(file_path).stem)
         out_default = Path(file_path).with_suffix(".epub")
         self.out_path.set(str(out_default))
-        # 自动检测编码：拖入即定，预览/解析/转换都用正确编码，不再默认 utf-8 乱码
-        self.encoding.set(self._auto_detect_encoding(file_path))
         self.refresh_preview()
 
         # 自动解析章节
@@ -1190,16 +1078,15 @@ class App(TkinterDnD.Tk):
     def _switch_to_batch(self, files: list[str]):
         self.batch_files = files
         self.is_batch_mode = True
-        # 逐文件自动检测编码（不再统一继承全局 utf-8）
-        self._file_encodings = {f: self._auto_detect_encoding(f) for f in files}
+        # 初始化每文件的独立编码（保留原有编码设置，或继承全局 encoding）
+        enc = self.encoding.get()
+        self._file_encodings = {f: enc for f in files}
         self.file_listbox.delete(0, tk.END)
         for f in files:
             self.file_listbox.insert(tk.END, Path(f).name)
 
         first = files[0]
         self.txt_path.set(first)
-        # 当前预览编码同步为该文件检测结果
-        self.encoding.set(self._file_encodings[first])
         if not self.out_path.get():
             self.out_path.set(str(Path(first).parent / "epub_output"))
         self.refresh_preview()
@@ -1586,82 +1473,25 @@ class App(TkinterDnD.Tk):
             self._set_ui_idle()
             self.progress_var.set(100)
             self.progress_label.config(text="处理完成！")
-            outs = self._last_outputs or [out]
-            if len(outs) > 1:
-                paths_text = "\n".join(str(p) for p in outs)
-                detail = f"已拆分为 {len(outs)} 卷：\n{paths_text}\n\n章节数：{ch_count}"
-            else:
-                detail = f"EPUB 文件已生成：\n{outs[0]}\n\n章节数：{ch_count}"
-            messagebox.showinfo("🎉 搞定！", detail)
+            messagebox.showinfo(
+                "🎉 搞定！",
+                f"EPUB 文件已生成：\n{out}\n\n章节数：{ch_count}",
+            )
 
         except Exception as e:
             self._set_ui_idle()
             self.progress_label.config(text="转换失败")
             messagebox.showerror("❌ 出错了", f"转换失败：{e}")
 
-    def _write_volumes(self, out, title, author, cover_image, n_items, build_one, volumes=None):
-        """按 self.max_chapters_per_volume 切块写多卷；返回输出路径列表。
-
-        build_one(start, end, volume_title, volumes) -> EpubBook
-        单卷（阈值<=0 或章节未超限）时返回 [out]，行为与原来完全一致；
-        此时若传入 volumes（嵌套分组）则生成『卷→章』嵌套 TOC。
-        多卷拆分时每个分卷各自扁平（volumes 置 None），避免跨卷下标错乱。
-        """
-        ranges = volume_ranges(n_items, self.max_chapters_per_volume.get())
-        if len(ranges) == 1:
-            book = build_one(0, n_items, title, volumes)
-            _epub.write_epub(out, book)
-            return [out]
-        outs = []
-        for i, (s, e) in enumerate(ranges, 1):
-            vtitle = f"{title} 第{i}卷"
-            vout = out.with_name(f"{out.stem}_卷{i}{out.suffix}")
-            book = build_one(s, e, vtitle, None)
-            _epub.write_epub(vout, book)
-            outs.append(vout)
-        return outs
-
     def _run_single_serial(self, txt, out, title, author, cover_image):
-        """串行路径：轻量索引未编辑 → Rust 按偏移打包 + 组装（内存恒定）；
-        编辑过（合并/删除）→ 回退原 build_epub（按需补齐正文）。"""
+        """串行路径：使用现有的 convert_single 或 build_epub（保持原逻辑不变）"""
         if self.chapters:
-            # 未编辑且所有章节带索引项 → 轻量打包路径（生成时才物化 xhtml 小文件）
-            if (not self._chapters_edited) and self._temp_path and \
-                    all(ch[2] for ch in self.chapters):
-                index = [ch[2] for ch in self.chapters]
-                parts = tempfile.mkdtemp(prefix="epub_parts_")
-                try:
-                    manifest = pack_chapters(
-                        self._temp_path, index, parts,
-                        toc_pattern=self._get_selected_pattern(), book_title=title,
-                    )
-                    # index 条目只有 start/end/title，不能直接当 chapters_subset 喂
-                    # build_epub_from_pack（它要 manifest 形状的带 file 条目，否则 KeyError: 'file'）。
-                    # manifest 与 index 同序，读一次 manifest 按同序位置切片传给子集组装。
-                    with open(manifest, encoding="utf-8") as mf:
-                        manifest_chapters = json.load(mf)["chapters"]
-                    volumes = _nested_volumes([e["title"] for e in index])
-                    self._last_outputs = self._write_volumes(
-                        out, title, author, cover_image, len(manifest_chapters),
-                        lambda s, e, t, v: build_epub_from_pack(
-                            parts, manifest, t, author, cover_image=cover_image,
-                            chapters_subset=manifest_chapters[s:e], volumes=v,
-                        ),
-                        volumes=volumes,
-                    )
-                finally:
-                    shutil.rmtree(parts, ignore_errors=True)
-                return len(manifest_chapters)
-            # 编辑过 → 回退原 build_epub（按需补齐正文）
-            self._ensure_all_bodies()
-            chapters = [(ch[0], ch[1]) for ch in self.chapters]
-            volumes = _nested_volumes([ch[0] for ch in self.chapters])
-            self._last_outputs = self._write_volumes(
-                out, title, author, cover_image, len(chapters),
-                lambda s, e, t, v: build_epub(chapters[s:e], t, author, cover_image=cover_image, volumes=v),
-                volumes=volumes,
+            book = build_epub(
+                self.chapters, title, author,
+                cover_image=cover_image,
             )
-            return len(chapters)
+            _epub.write_epub(out, book)
+            return len(self.chapters)
         else:
             pattern = self._get_selected_pattern()
             result = convert_single(
@@ -1671,7 +1501,6 @@ class App(TkinterDnD.Tk):
             )
             if not result.success:
                 raise RuntimeError(result.error)
-            self._last_outputs = [result.output_path]
             return result.chapter_count
 
     def _run_single_parallel(self, txt, out, title, author, cover_image, num_chunks):
@@ -1707,12 +1536,8 @@ class App(TkinterDnD.Tk):
         self.progress_label.config(text="正在构建 EPUB...")
         self.update()
 
-        volumes = _nested_volumes([t for t, _ in all_chapters])
-        self._last_outputs = self._write_volumes(
-            out, title, author, cover_image, len(all_chapters),
-            lambda s, e, t, v: build_epub(all_chapters[s:e], t, author, cover_image=cover_image, volumes=v),
-            volumes=volumes,
-        )
+        book = build_epub(all_chapters, title, author, cover_image=cover_image)
+        _epub.write_epub(out, book)
         return len(all_chapters)
 
     def _merge_chunks(self, temp_files):
@@ -1910,16 +1735,12 @@ class App(TkinterDnD.Tk):
         """完成单个文件：合并 → build_epub → 写入，返回 ConversionResult"""
         sorted_paths = [chunk_results[i] for i in sorted(chunk_results)]
         chapters = self._merge_chunks(sorted_paths)
-        volumes = _nested_volumes([t for t, _ in chapters])
-        outs = self._write_volumes(
-            meta["out"], meta["title"], meta["author"], None, len(chapters),
-            lambda s, e, t, v: build_epub(chapters[s:e], t, meta["author"], volumes=v),
-            volumes=volumes,
-        )
+        book = build_epub(chapters, meta["title"], meta["author"])
+        _epub.write_epub(meta["out"], book)
         return ConversionResult(
             success=True,
             file_path=meta["path"],
-            output_path=outs[0],
+            output_path=meta["out"],
             chapter_count=len(chapters),
         )
 
